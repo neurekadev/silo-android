@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets
 import org.siloserver.silo.common.player.video.VideoPlayerRouteArgs
 import org.siloserver.silo.model.catalog.BrowseItem
 import org.siloserver.silo.model.section.LibraryCollection
+import org.siloserver.silo.model.section.SectionCollectionCard
 import org.siloserver.silo.model.section.SectionItem
 
 /**
@@ -30,7 +31,15 @@ sealed class Route(val route: String) {
             const val ROUTE = "server_setup_prefilled?url={url}"
         }
     }
+    /** Settings › Accounts: every saved server and its accounts (the route kept its old name). */
     data object ServerList : Route("server_list")
+
+    /** One saved account's page under Settings › Accounts. */
+    data class AccountDetail(val accountId: String) : Route("server_list/account/${Uri.encode(accountId)}") {
+        companion object {
+            const val ROUTE = "server_list/account/{accountId}"
+        }
+    }
     data object Login : Route("login")
     data object Setup : Route("setup")
     data object Signup : Route("signup")
@@ -88,6 +97,21 @@ sealed class Route(val route: String) {
 
     // --- Profile selection (no bottom nav) ---
     data object ProfileSelection : Route("profiles")
+    /** "Choose a new password": the account signed in with a temporary password an admin set. */
+    data object PasswordChange : Route("account/password_change")
+
+    /**
+     * Change Account: every saved server's accounts, to open another one.
+     * [addAccountOn] scrolls to that server's "Add an account" row (Add ›
+     * Add an account on the picker).
+     */
+    data class ChangeAccount(val addAccountOn: String? = null) : Route(
+        if (addAccountOn == null) "change_account" else "change_account?addOn=${Uri.encode(addAccountOn)}",
+    ) {
+        companion object {
+            const val ROUTE = "change_account?addOn={addOn}"
+        }
+    }
     data object CreateProfile : Route("profiles/create")
     data class EditProfile(val profileId: String) : Route("profiles/${Uri.encode(profileId)}/edit") {
         companion object {
@@ -398,6 +422,29 @@ fun libraryCollectionDetailRoute(
         "library_collection"
     },
 ).route
+
+/**
+ * Opens a card of a row of collections. A personal collection opens as the
+ * Collections screen opens it; a server collection opens in [libraryId] (the
+ * card's library unless a library page passes its own) with [mediaScope].
+ * Null when a server collection has no library to open in.
+ */
+fun sectionCollectionCardRoute(
+    card: SectionCollectionCard,
+    libraryId: Int? = card.libraryIdInt,
+    mediaScope: String? = null,
+): String? = if (card.isUserCollection) {
+    Route.CollectionDetail(card.id).route
+} else {
+    libraryId?.let {
+        Route.CollectionDetail(
+            collectionId = card.id,
+            libraryId = it,
+            source = "library_collection",
+            mediaScope = mediaScope,
+        ).route
+    }
+}
 
 /**
  * Continue Watching episodes belong to the unified series detail surface.

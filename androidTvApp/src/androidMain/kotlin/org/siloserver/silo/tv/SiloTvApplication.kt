@@ -35,11 +35,28 @@ class SiloTvApplication : Application(), Configuration.Provider, SingletonImageL
     override fun onCreate() {
         super.onCreate()
         DiagnosticsStartup.installCrashCapture(this)
+        // Before any request: v2 problem details show in the app's language.
+        org.siloserver.silo.common.i18n.ServerText.install(this)
+        org.siloserver.silo.common.i18n.LocaleFormat.refresh(this)
+        org.siloserver.silo.common.i18n.EnglishText.install(this)
         val koinApp = startKoin {
             androidContext(this@SiloTvApplication)
             modules(sharedModules() + playerModule + playerInfraModule + marqueeModule + watchPartyModule + androidTvModule + diagnosticsModule)
         }
         DiagnosticsStartup.startCoordinator { koinApp.koin.get<DiagnosticsCoordinator>() }
+        // Account-scoped preferences and local state: adopt pre-account values
+        // into the migrated account (synchronously, before any store reads
+        // them), purge signed-out accounts, and remember the last tile.
+        // Guarded — never load-bearing for cold start.
+        runCatching {
+            org.siloserver.silo.common.store.AccountLocalData(
+                context = this@SiloTvApplication,
+                registry = koinApp.koin.get(),
+                launchPreferences = koinApp.koin.get(),
+            ).start()
+        }.onFailure {
+            android.util.Log.w("SiloTvApplication", "Account local data init failed: ${it::class.simpleName}")
+        }
         koinApp.koin.get<org.siloserver.silo.repository.ImageCapabilitiesSession>().start(
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO),
         )
@@ -125,6 +142,7 @@ class SiloTvApplication : Application(), Configuration.Provider, SingletonImageL
                 registry = koinApp.koin.get(),
                 database = koinApp.koin.get(),
                 storage = koinApp.koin.get(),
+                legacyImporter = koinApp.koin.getOrNull(),
             )
         }.onFailure {
             android.util.Log.w("SiloTvApplication", "Orphaned server purge init failed", it)

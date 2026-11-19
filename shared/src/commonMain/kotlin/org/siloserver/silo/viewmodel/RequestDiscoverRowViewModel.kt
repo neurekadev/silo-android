@@ -1,5 +1,8 @@
 package org.siloserver.silo.viewmodel
 
+import org.siloserver.silo.common.i18n.SharedString
+import org.siloserver.silo.common.i18n.UiText
+import org.siloserver.silo.common.i18n.errorText
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -11,7 +14,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.siloserver.silo.model.request.RequestMediaResult
 import org.siloserver.silo.model.request.applyingFollowUpdate
-import org.siloserver.silo.model.request.applyingRequestUpdate
+import org.siloserver.silo.repository.applyingRequestEvent
 import org.siloserver.silo.network.ApiResult
 import org.siloserver.silo.repository.RequestsRepository
 
@@ -22,14 +25,14 @@ data class RequestDiscoverRowUiState(
     val isLoadingMore: Boolean = false,
     val endReached: Boolean = false,
     /** A first page that failed; a later page's failure keeps what loaded. */
-    val error: String? = null,
+    val error: UiText? = null,
     /** A later page failed: the grid offers to try it again. */
     val moreFailed: Boolean = false,
     /** The row is gone from the server's layout (turned off or removed). */
     val notFound: Boolean = false,
 )
 
-private const val LOAD_FAILED = "Couldn't load this row. Try again in a moment."
+private val LOAD_FAILED = UiText.Key(SharedString.RequestRowLoadFailed)
 
 /**
  * Every title of one row of the server's Discover layout, read page by page
@@ -51,7 +54,7 @@ class RequestDiscoverRowViewModel(
         // A request or follow made from a title's detail page shows here too.
         viewModelScope.launch {
             repository.lastUpdate.drop(1).filterNotNull().collect { event ->
-                _uiState.update { it.copy(results = it.results.applyingRequestUpdate(event.record)) }
+                _uiState.update { it.copy(results = it.results.applyingRequestEvent(event)) }
             }
         }
         viewModelScope.launch {
@@ -102,7 +105,7 @@ class RequestDiscoverRowViewModel(
                             isLoadingMore = false,
                             notFound = gone && nothingShown,
                             endReached = nextPage == null,
-                            error = if (nothingShown && !gone) result.message.ifBlank { LOAD_FAILED } else null,
+                            error = if (nothingShown && !gone) result.errorText(LOAD_FAILED) else null,
                             moreFailed = !nothingShown && !gone,
                         )
                     }

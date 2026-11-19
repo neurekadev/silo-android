@@ -1,11 +1,10 @@
 package org.siloserver.silo.tv.ui.screens.library
 
+import org.siloserver.silo.viewmodel.DetailSeeds
+import org.siloserver.silo.common.i18n.LocaleFormat
+import org.siloserver.silo.common.i18n.text
 import org.siloserver.silo.model.section.ResolvedSection
-import org.siloserver.silo.model.catalog.CatalogBoxSet
-import org.siloserver.silo.model.catalog.boxSetCard
-import org.siloserver.silo.model.catalog.boxSetFilmCount
-import org.siloserver.silo.model.catalog.cardCaption
-import org.siloserver.silo.model.catalog.watchedFraction
+import org.siloserver.silo.model.section.SectionCollectionCard
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -33,7 +32,6 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Headphones
-import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -57,6 +55,11 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.annotation.StringRes
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.i18n.stringResourceWithNames
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.siloserver.silo.tv.ui.focus.requestFocusUntilObserved
@@ -71,10 +74,10 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import org.siloserver.silo.common.ui.components.ThumbhashImage
 import org.siloserver.silo.model.catalog.AudiobookGroup
-import org.siloserver.silo.model.section.LibraryCollection
 import org.siloserver.silo.tv.ui.components.TvAlphabetRail
 import org.siloserver.silo.tv.ui.components.TvCardWidth
 import org.siloserver.silo.tv.ui.components.TvCatalogEmptyState
+import org.siloserver.silo.tv.ui.components.TvCollectionCard
 import org.siloserver.silo.tv.ui.components.TvErrorScreen
 import org.siloserver.silo.tv.ui.components.TvFilterChip
 import org.siloserver.silo.tv.ui.components.TvMediaCard
@@ -86,10 +89,7 @@ import org.siloserver.silo.tv.ui.theme.rememberTvGridBringIntoViewSpec
 import org.siloserver.silo.tv.ui.theme.siloCardDefaults
 import org.siloserver.silo.tv.ui.theme.tvPresetGridColumns
 import org.siloserver.silo.tv.ui.components.TvSectionHeader
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.offset
-import androidx.compose.ui.unit.sp
 import org.koin.compose.koinInject
 import org.koin.compose.viewmodel.koinViewModel
 import org.koin.core.parameter.parametersOf
@@ -111,10 +111,7 @@ fun TvLibraryDetailScreen(
     libraryTitle: String,
     libraryType: String,
     mediaScope: String? = null,
-    /** Browse with box set cards in place of a TMDB collection's movies. */
-    boxSetsEnabled: Boolean = false,
     onItemClick: (contentId: String) -> Unit,
-    onBoxSetClick: (CatalogBoxSet) -> Unit = {},
     onCollectionClick: (collectionId: String, title: String, isUserCollection: Boolean) -> Unit,
     /** Opens a Recommended row's full page from its "Explore all" card. */
     onExploreSection: ((ResolvedSection) -> Unit)? = null,
@@ -132,17 +129,11 @@ fun TvLibraryDetailScreen(
     // Plays the first pick of a shuffle started from the Library tab.
     onShuffleStarted: (org.siloserver.silo.model.shuffle.Shuffle) -> Unit = {},
     viewModel: TvLibraryDetailViewModel = koinViewModel(
-        // Turning box sets on or off rebuilds the browse, which groups differently.
-        key = "library-$libraryId-${mediaScope.orEmpty()}${if (boxSetsEnabled) "-box-sets" else ""}",
-        parameters = { parametersOf(libraryId, libraryTitle, libraryType, mediaScope, boxSetsEnabled) },
+        key = "library-$libraryId-${mediaScope.orEmpty()}",
+        parameters = { parametersOf(libraryId, libraryTitle, libraryType, mediaScope) },
     ),
 ) {
     val state by viewModel.uiState.collectAsState()
-    // A browse grid card is a title or, in a box set library, a box set.
-    val openBrowseItem: (String) -> Unit = { contentId ->
-        val boxSet = state.browseItems.firstOrNull { it.contentId == contentId }?.boxSetCard
-        if (boxSet != null) onBoxSetClick(boxSet) else onItemClick(contentId)
-    }
     val shuffleLauncher = org.siloserver.silo.common.ui.rememberShuffleLauncher(
         org.koin.compose.koinInject(),
         onShuffleStarted,
@@ -186,12 +177,15 @@ fun TvLibraryDetailScreen(
                 focusRequest = sectionRequestNonce,
                 onContentUpFallbackChanged = onContentUpFallbackChanged,
                 onExploreSection = onExploreSection,
+                onCollectionClick = { card ->
+                    onCollectionClick(card.id, card.title, card.isUserCollection)
+                },
             )
             // Browse is the tvOS `TVLibraryGridView` embed: Sort/Filter
             // control row over the grid, with the A–Z rail always on.
             TvLibraryTab.Browse -> LibraryTab(
                 state = state,
-                onItemClick = openBrowseItem,
+                onItemClick = onItemClick,
                 onNamePrefixChanged = viewModel::onNamePrefixChanged,
                 onGenreChanged = viewModel::onGenreChanged,
                 onLoadMore = viewModel::loadMoreBrowse,
@@ -207,7 +201,7 @@ fun TvLibraryDetailScreen(
             )
             TvLibraryTab.Genres -> LibraryTab(
                 state = state,
-                onItemClick = openBrowseItem,
+                onItemClick = onItemClick,
                 onNamePrefixChanged = viewModel::onNamePrefixChanged,
                 onGenreChanged = viewModel::onGenreChanged,
                 onLoadMore = viewModel::loadMoreBrowse,
@@ -217,7 +211,7 @@ fun TvLibraryDetailScreen(
             )
             TvLibraryTab.Alphabet -> LibraryTab(
                 state = state,
-                onItemClick = openBrowseItem,
+                onItemClick = onItemClick,
                 onNamePrefixChanged = viewModel::onNamePrefixChanged,
                 onGenreChanged = viewModel::onGenreChanged,
                 onLoadMore = viewModel::loadMoreBrowse,
@@ -228,7 +222,7 @@ fun TvLibraryDetailScreen(
             )
             TvLibraryTab.RecentlyAdded -> LibraryTab(
                 state = state,
-                onItemClick = openBrowseItem,
+                onItemClick = onItemClick,
                 onNamePrefixChanged = viewModel::onNamePrefixChanged,
                 onGenreChanged = viewModel::onGenreChanged,
                 onLoadMore = viewModel::loadMoreBrowse,
@@ -239,7 +233,7 @@ fun TvLibraryDetailScreen(
                 if (state.selectedAudiobookGroup == null) {
                     AudiobookGroupsTab(
                         state = state,
-                        groupLabel = "authors",
+                        emptyMessage = CommonR.string.library_noAudiobookAuthors,
                         onGroupClick = viewModel::onAudiobookGroupSelected,
                         onLoadMore = viewModel::loadMoreAudiobookGroups,
                         onRetry = viewModel::retryAudiobookGroups,
@@ -248,7 +242,7 @@ fun TvLibraryDetailScreen(
                 } else {
                     LibraryTab(
                         state = state,
-                        onItemClick = openBrowseItem,
+                        onItemClick = onItemClick,
                         onNamePrefixChanged = viewModel::onNamePrefixChanged,
                         onGenreChanged = viewModel::onGenreChanged,
                         onLoadMore = viewModel::loadMoreBrowse,
@@ -262,7 +256,7 @@ fun TvLibraryDetailScreen(
                 if (state.selectedAudiobookGroup == null) {
                     AudiobookGroupsTab(
                         state = state,
-                        groupLabel = "series",
+                        emptyMessage = CommonR.string.library_noAudiobookSeries,
                         onGroupClick = viewModel::onAudiobookGroupSelected,
                         onLoadMore = viewModel::loadMoreAudiobookGroups,
                         onRetry = viewModel::retryAudiobookGroups,
@@ -271,7 +265,7 @@ fun TvLibraryDetailScreen(
                 } else {
                     LibraryTab(
                         state = state,
-                        onItemClick = openBrowseItem,
+                        onItemClick = onItemClick,
                         onNamePrefixChanged = viewModel::onNamePrefixChanged,
                         onGenreChanged = viewModel::onGenreChanged,
                         onLoadMore = viewModel::loadMoreBrowse,
@@ -307,9 +301,10 @@ private fun RecommendedTab(
     focusRequest: Int,
     onContentUpFallbackChanged: ((((Boolean) -> Boolean)?) -> Unit)?,
     onExploreSection: ((ResolvedSection) -> Unit)?,
+    onCollectionClick: (SectionCollectionCard) -> Unit,
 ) {
     val rows = remember(state.sections) {
-        state.sections.filter { !it.featured && it.items.isNotEmpty() }
+        state.sections.filter { (!it.featured || it.isCollectionRow) && it.hasCards }
     }
 
     when {
@@ -320,7 +315,7 @@ private fun RecommendedTab(
         }
         state.recommendedError != null && state.sections.isEmpty() -> {
             TvErrorScreen(
-                message = state.recommendedError,
+                message = state.recommendedError.text(),
                 onRetry = onRetry,
                 modifier = Modifier.padding(
                     start = Spacing.safeArea,
@@ -331,7 +326,7 @@ private fun RecommendedTab(
         }
         rows.isEmpty() -> {
             TvCatalogEmptyState(
-                message = "${state.title} is empty.",
+                message = stringResourceWithNames(CommonR.string.library_namedIsEmpty, state.title),
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -345,6 +340,10 @@ private fun RecommendedTab(
                     onInitialContentFocus = onInitialContentFocus,
                     onContentUpFallbackChanged = onContentUpFallbackChanged,
                     onExploreAllForSection = onExploreSection,
+                    onCollectionClick = onCollectionClick,
+                    // As the Collections grid: a Movies- or Series-scoped page
+                    // would show the whole collection's count.
+                    showCollectionCounts = state.mediaScope == null,
                 )
                 state.recommendedError?.let { message ->
                     Row(
@@ -354,8 +353,8 @@ private fun RecommendedTab(
                         horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(message, modifier = Modifier.weight(1f))
-                        Button(onClick = onRetry) { Text("Retry") }
+                        Text(message.text(), modifier = Modifier.weight(1f))
+                        Button(onClick = onRetry) { Text(stringResource(CommonR.string.common_retry)) }
                     }
                 }
             }
@@ -408,7 +407,7 @@ private fun LibraryTab(
         itemIds = state.browseItems.map { it.contentId },
         hasMore = state.browseHasMore,
         isLoadingMore = state.browseLoadingMore,
-        errorMessage = state.browseError,
+        errorMessage = state.browseError?.text(),
         surfaceKey = state.selectedTab.name,
         onLoadMore = onLoadMore,
         // Headers occupy full-span slots ahead of the cards, so the grid's own
@@ -429,9 +428,9 @@ private fun LibraryTab(
         // also overwrites the saved state.
         val canClearFilters = showBrowseControls && state.browseFilter.facetSelection.canReset
         TvErrorScreen(
-            message = state.browseError,
+            message = state.browseError.text(),
             onRetry = onRetry,
-            secondaryActionLabel = "Clear filters".takeIf { canClearFilters },
+            secondaryActionLabel = stringResource(CommonR.string.library_clearFilters).takeIf { canClearFilters },
             onSecondaryAction = { onFacetSelectionApplied(TvCatalogFacetSelection()) }.takeIf { canClearFilters },
             modifier = Modifier.padding(
                 start = Spacing.safeArea,
@@ -494,7 +493,12 @@ private fun LibraryTab(
 
     when (openPanel) {
         TvBrowsePanel.Sort -> TvBrowseSortPanel(
-            options = TvLibrarySortOption.availableFor(state.libraryType),
+            options = TvLibrarySortOption.availableFor(
+                libraryType = state.libraryType,
+                mediaScope = state.mediaScope,
+                shownRatingSources = rememberShownRatingSources(),
+                current = state.browseFilter.sort,
+            ),
             currentSort = state.browseFilter.sort,
             order = state.browseFilter.order,
             onSelect = { option ->
@@ -605,7 +609,10 @@ private fun LibraryGrid(
         ) {
             if (showBrowseControls) {
                 item(span = { GridItemSpan(maxLineSpan) }, key = "browse-controls") {
-                    val sortOption = TvLibrarySortOption.fromWire(state.browseFilter.sort)
+                    val sortOption = TvLibrarySortOption.fromWire(
+                        state.browseFilter.sort,
+                        org.siloserver.silo.catalog.sort.CatalogSortRelevance.forLibrary(state.libraryType, state.mediaScope),
+                    )
                     var controlsFocused by remember { mutableStateOf(false) }
                     // Scrolling back up lands the pills via minimal
                     // bring-into-view (pinned at the viewport top edge);
@@ -666,9 +673,9 @@ private fun LibraryGrid(
                 item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
                     TvCatalogEmptyState(
                         message = if (state.browseLibraryHasItems == false) {
-                            "This library is empty."
+                            stringResource(CommonR.string.library_isEmptySentence)
                         } else {
-                            "No titles match the current filters."
+                            stringResource(CommonR.string.library_noTitlesMatchFilters)
                         },
                     )
                 }
@@ -703,29 +710,25 @@ private fun LibraryGrid(
                             }
                         }
                     }
-                    // A box set card opens the box set and has no item menu.
-                    val boxSet = item.boxSetCard
                     TvMediaCard(
                         title = item.title,
-                        posterUrl = item.posterUrl ?: boxSet?.posterUrl,
-                        posterThumbhash = item.posterThumbhash ?: boxSet?.posterThumbhash,
+                        posterUrl = item.posterUrl,
+                        posterThumbhash = item.posterThumbhash,
                         year = item.year.takeIf { it > 0 },
-                        userState = userState.takeIf { boxSet == null },
-                        progress = boxSet?.watchedFraction,
-                        mediaType = if (boxSet != null) "movie" else item.type,
-                        badge = if (boxSet != null) "Box set" else null,
-                        cornerLabel = boxSet?.let { boxSetFilmCount(it.movieCount) },
-                        caption = boxSet?.cardCaption(),
-                        sleeves = org.siloserver.silo.tv.ui.theme.BoxSetSleeves.takeIf { boxSet != null },
+                        userState = userState,
+                        mediaType = item.type,
                         width = TvCardWidth,
                         fillWidth = true,
-                        onClick = { onItemClick(item.contentId) },
+                        onClick = {
+                            DetailSeeds.offer(item)
+                            onItemClick(item.contentId)
+                        },
                         focusRequester = restoredItemFocusRequester.takeIf { index == restoredItemIndex },
                         modifier = Modifier
                             .fillMaxWidth()
                             .onFocusChanged { onItemFocused(index, it.hasFocus) },
-                        overlay = org.siloserver.silo.overlays.OverlayDataExtractor.fromBrowseItem(item).takeIf { boxSet == null },
-                        actions = if (boxSet != null) org.siloserver.silo.tv.ui.components.TvMediaCardActions() else actions,
+                        overlay = org.siloserver.silo.overlays.OverlayDataExtractor.fromBrowseItem(item),
+                        actions = actions,
                     )
                 }
             }
@@ -743,7 +746,8 @@ private fun LibraryGrid(
 @Composable
 private fun AudiobookGroupsTab(
     state: TvLibraryDetailViewModel.UiState,
-    groupLabel: String,
+    /** What the grid says when there are no groups, e.g. no audiobook authors. */
+    @StringRes emptyMessage: Int,
     onGroupClick: (AudiobookGroup) -> Unit,
     onLoadMore: () -> Unit,
     onRetry: () -> Unit,
@@ -821,12 +825,12 @@ private fun AudiobookGroupsTab(
                 }
                 state.audiobookGroupsError != null -> {
                     item(span = { GridItemSpan(maxLineSpan) }, key = "error") {
-                        TvErrorScreen(message = state.audiobookGroupsError, onRetry = onRetry)
+                        TvErrorScreen(message = state.audiobookGroupsError.text(), onRetry = onRetry)
                     }
                 }
                 state.audiobookGroups.isEmpty() -> {
                     item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
-                        TvCatalogEmptyState(message = "No audiobook $groupLabel found.")
+                        TvCatalogEmptyState(message = stringResource(emptyMessage))
                     }
                 }
                 else -> {
@@ -867,7 +871,9 @@ private fun AudiobookGroupDrillInHeader(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TvFilterChip(
-            text = "All ${tab.label}",
+            text = stringResource(
+                if (tab == TvLibraryTab.Series) CommonR.string.library_allSeries else CommonR.string.library_allAuthors,
+            ),
             selected = false,
             onClick = onClear,
         )
@@ -977,7 +983,7 @@ private fun GenreChipCloud(
         verticalArrangement = Arrangement.spacedBy(Spacing.sm),
     ) {
         Text(
-            text = if (loading) "Loading genres" else "Genres",
+            text = stringResource(if (loading) CommonR.string.library_loadingGenres else CommonR.string.library_genres),
             style = MaterialTheme.typography.titleMedium,
             color = Color.White.copy(alpha = 0.74f),
         )
@@ -991,7 +997,7 @@ private fun GenreChipCloud(
         ) {
             item(key = "genre-all") {
                 TvFilterChip(
-                    text = "All",
+                    text = stringResource(CommonR.string.filters_all),
                     selected = selectedGenre == null,
                     onClick = { onGenreChanged(null) },
                 )
@@ -1116,12 +1122,12 @@ private fun CollectionsTab(
                 }
                 state.collectionsError != null && state.collections.isEmpty() -> {
                     item(span = { GridItemSpan(maxLineSpan) }, key = "error") {
-                        TvErrorScreen(message = state.collectionsError, onRetry = onRetry)
+                        TvErrorScreen(message = state.collectionsError.text(), onRetry = onRetry)
                     }
                 }
                 state.collections.isEmpty() -> {
                     item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
-                        TvCatalogEmptyState(message = "No collections in this library.")
+                        TvCatalogEmptyState(message = stringResource(CommonR.string.library_noCollectionsInLibrary))
                     }
                 }
                 // Grouped collections (tvOS `TVLibraryCollectionsView`): the
@@ -1182,107 +1188,38 @@ private fun CollectionsGroupHeader(name: String) {
     )
 }
 
-// ============================================================================
-// Collection card (renders inside the Collections grid)
-// ============================================================================
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun TvCollectionCard(
-    collection: LibraryCollection,
-    onClick: () -> Unit,
-    focusRequester: FocusRequester? = null,
-    modifier: Modifier = Modifier,
-) {
-    // Same focus treatment (lift + white outline + shadow) and caption metrics
-    // as `TvMediaCard`, so collection posters sit alongside Browse posters
-    // without reading as a different card family.
-    val interactionSource = remember { MutableInteractionSource() }
-    val isFocused by interactionSource.collectIsFocusedAsState()
-    val cardFocus = siloCardDefaults(shape = TvCollectionCardShape)
-
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Card(
-            onClick = onClick,
-            interactionSource = interactionSource,
-            shape = CardDefaults.shape(shape = TvCollectionCardShape),
-            scale = cardFocus.scale,
-            border = cardFocus.border,
-            glow = cardFocus.glow,
-            modifier = modifier
-                .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
-                .fillMaxWidth()
-                .aspectRatio(2f / 3f),
-        ) {
-            if (!collection.posterUrl.isNullOrBlank()) {
-                ThumbhashImage(
-                    url = collection.posterUrl,
-                    thumbhash = collection.posterThumbhash,
-                    contentDescription = collection.name,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(SubtleSurface),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.VideoLibrary,
-                        contentDescription = null,
-                        tint = Color.White.copy(alpha = 0.8f),
-                    )
-                }
-            }
-        }
-
-        // Title-only caption, start-aligned like every other poster caption in
-        // the app. The item count was dropped: it doubled the caption height
-        // and made the rows read differently from Browse.
-        Spacer(modifier = Modifier.height(11.dp))
-
-        Text(
-            text = collection.name,
-            style = MaterialTheme.typography.titleSmall.copy(
-                fontSize = 15.5.sp,
-                lineHeight = 18.5.sp,
-            ),
-            color = if (isFocused) Color.White else Color.White.copy(alpha = 0.78f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth(),
-        )
-    }
-}
-
-private val TvCollectionCardShape = RoundedCornerShape(8.dp)
 private val CollectionsGroupHeaderNudge = 10.dp
 
+@Composable
 private fun audiobookGroupSubtitle(group: AudiobookGroup): String? {
     val parts = mutableListOf<String>()
     if (group.itemCount > 0) {
-        parts += "${group.itemCount} ${if (group.itemCount == 1) "book" else "books"}"
+        parts += pluralStringResource(CommonR.plurals.library_audiobookGroup_books, group.itemCount, group.itemCount, LocaleFormat.integer(group.itemCount))
     }
     group.totalDurationSeconds
         ?.takeIf { it > 0 }
-        ?.let(::formatAudiobookGroupDuration)
-        ?.let { parts += it }
+        ?.let { parts += formatAudiobookGroupDuration(it) }
     if (group.inProgressCount > 0) {
-        parts += "${group.inProgressCount} in progress"
+        parts += pluralStringResource(
+            CommonR.plurals.library_audiobookGroup_inProgress,
+            group.inProgressCount,
+            group.inProgressCount,
+            LocaleFormat.integer(group.inProgressCount),
+        )
     }
     return parts.takeIf { it.isNotEmpty() }?.joinToString(" • ")
 }
 
+@Composable
 private fun formatAudiobookGroupDuration(seconds: Long): String {
     val hours = seconds / 3600
     val minutes = (seconds % 3600) / 60
     return when {
-        hours > 0 && minutes > 0 -> "${hours}h ${minutes}m"
-        hours > 0 -> "${hours}h"
-        minutes > 0 -> "${minutes}m"
-        else -> "<1m"
+        hours > 0 && minutes > 0 ->
+            stringResource(CommonR.string.catalog_runtimeHoursMinutes, LocaleFormat.integer(hours), LocaleFormat.integer(minutes))
+        hours > 0 -> stringResource(CommonR.string.catalog_runtimeHours, LocaleFormat.integer(hours))
+        minutes > 0 -> stringResource(CommonR.string.catalog_runtimeMinutesShort, LocaleFormat.integer(minutes))
+        else -> stringResource(CommonR.string.catalog_runtimeUnderMinute)
     }
 }
 

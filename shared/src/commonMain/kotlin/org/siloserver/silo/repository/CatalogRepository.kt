@@ -2,7 +2,6 @@ package org.siloserver.silo.repository
 
 import org.siloserver.silo.domain.settings.CatalogLanguageRevision
 import org.siloserver.silo.repository.port.CatalogCacheScope
-import org.siloserver.silo.model.catalog.BOX_SET_GROUP
 import org.siloserver.silo.model.catalog.CatalogBoxSet
 import org.siloserver.silo.model.catalog.CatalogBoxSetDetail
 import org.siloserver.silo.model.catalog.CatalogFiltersResponse
@@ -17,6 +16,7 @@ import org.siloserver.silo.model.catalog.SeasonsResponse
 import org.siloserver.silo.model.catalog.WatchDetail
 import org.siloserver.silo.network.ApiResult
 import org.siloserver.silo.network.apiv2.CatalogContinuationV2
+import org.siloserver.silo.network.apiv2.CatalogLettersV2
 import org.siloserver.silo.network.DefaultIdentityTransitionBarrier
 import org.siloserver.silo.network.IdentityTransitionBarrier
 import org.siloserver.silo.network.api.CatalogApi
@@ -40,6 +40,9 @@ import kotlinx.coroutines.sync.withLock
  */
 const val BOX_SET_SEARCH_GRACE_MILLIS = 1_500L
 
+/** Letter indexes kept for the session, one per library and filter set. */
+private const val LETTERS_CACHE_ENTRIES = 32
+
 class CatalogRepository(
     private val catalogApi: CatalogApi,
     /** Offline read cache for a library's default first page (Track B). No-op by default. */
@@ -56,6 +59,11 @@ class CatalogRepository(
      * leaves composition.
      */
     private val detailRequestScope = CoroutineScope(SupervisorJob() + requestDispatcher)
+
+    init {
+        // A detail page's card seed belongs to the identity it was tapped under.
+        org.siloserver.silo.viewmodel.DetailSeeds.bindIdentity(identityTransitions.generation)
+    }
     private val detailRequestMutex = Mutex()
     private data class DetailRequestKey(
         val identityGeneration: Long,
@@ -90,6 +98,18 @@ class CatalogRepository(
             else -> null
         }
 
+    /**
+     * The library's exact size under [mediaType] (a mixed library's Movies or
+     * Series side), for the phone Libraries header. Null when the server
+     * could not answer or can only estimate it. Read straight from the API,
+     * like [libraryHasItems], so the one-item page never reaches the cache.
+     */
+    suspend fun libraryCount(libraryId: Int, mediaType: String? = null): Int? =
+        when (val result = catalogApi.getCatalog(libraryId = libraryId, mediaType = mediaType, limit = 1)) {
+            is ApiResult.Success -> result.data.total.takeIf { result.data.totalExact != false }
+            else -> null
+        }
+
     /** Browse the catalog with optional filters, sorting, and pagination. */
     suspend fun browse(
         source: String? = null,
@@ -107,8 +127,12 @@ class CatalogRepository(
         yearMax: Int? = null,
         queryGroups: List<CatalogQueryGroup> = emptyList(),
         match: String? = null,
-        /** [BOX_SET_GROUP] for a library with box sets on; the server does the grouping. */
-        group: String? = null,
+        /** Zero-based list position to read from; see [CatalogApi.getCatalog]. */
+        seek: Int? = null,
+        /** The list's `window_cursor`, sent with [seek]. */
+        windowCursor: String? = null,
+        /** True when the caller already knows the list's size (a letter index's total). */
+        skipTotal: Boolean = false,
     ): ApiResult<CatalogResponse> {
         val requestIdentityGeneration = identityTransitions.generation.value
         val sized = if (continuation == null) artwork.sizedRead(ArtworkSurface.BROWSE) else null
@@ -130,16 +154,15 @@ class CatalogRepository(
             yearMax = yearMax,
             queryGroups = queryGroups,
             match = match,
-            group = group,
+            seek = seek,
+            windowCursor = windowCursor,
+            skipTotal = skipTotal,
         )
 
         // Only the unfiltered, first-page default browse of a single library is
         // cached for offline (every request-shaping param must be at its default).
-        // A box set library's default browse is grouped; its grouped page is
-        // kept apart from the plain one, so a library whose box sets turn off
-        // never serves box set cards offline.
         val cacheableLibraryId = libraryId?.takeIf {
-            continuation == null &&
+            continuation == null && (seek == null || seek == 0) && !skipTotal &&
                 query == null && genre == null && contentRating == null &&
                 namePrefix == null && yearMin == null && yearMax == null &&
                 source == null && mediaType == null &&
@@ -150,16 +173,75 @@ class CatalogRepository(
         if (result is ApiResult.Success) {
             if (sized?.cacheable == true) {
                 writeIfIdentityUnchanged(requestIdentityGeneration, artworkFingerprint) { cacheWriteLease ->
-                    catalogCache.cacheDefaultLibraryPage(cacheableLibraryId, result.data, cacheWriteLease, group)
+                    catalogCache.cacheDefaultLibraryPage(cacheableLibraryId, result.data, cacheWriteLease)
                 }
             }
             return result
         }
         if (result.canServeCache()) {
-            catalogCache.getCachedDefaultLibraryPage(cacheableLibraryId, group)?.let { return ApiResult.Success(it.copy(hasMore = false, continuation = null)) }
+            catalogCache.getCachedDefaultLibraryPage(cacheableLibraryId)?.let { return ApiResult.Success(it.copy(hasMore = false, continuation = null)) }
         }
         return result
     }
+
+    /** The scope and rules a letter index counts; one entry of [lettersCache]. */
+    private data class LettersKey(
+        val identityGeneration: Long,
+        val languageRevision: Long,
+        val libraryId: Int?,
+        val mediaType: String?,
+        val order: String?,
+        val queryGroups: List<CatalogQueryGroup>,
+        val match: String?,
+    )
+    private val lettersCacheMutex = Mutex()
+    private val lettersCache = LinkedHashMap<LettersKey, CatalogLettersV2>()
+
+    /**
+     * Where each letter starts in the title-ordered list [browse] pages for
+     * the same library, media type, rules and [order]. Success(null) means the
+     * server has no letter index.
+     */
+    suspend fun catalogLetters(
+        libraryId: Int?,
+        mediaType: String? = null,
+        order: String? = null,
+        queryGroups: List<CatalogQueryGroup> = emptyList(),
+        match: String? = null,
+    ): ApiResult<CatalogLettersV2?> {
+        val key = lettersKey(libraryId, mediaType, order, queryGroups, match)
+        val result = catalogApi.getCatalogLetters(libraryId, mediaType, order, queryGroups, match)
+        if (result is ApiResult.Success) {
+            lettersCacheMutex.withLock {
+                // Only an answer for the identity and language still current.
+                if (key == lettersKey(libraryId, mediaType, order, queryGroups, match)) {
+                    val index = result.data
+                    if (index == null) lettersCache.remove(key) else lettersCache[key] = index
+                    while (lettersCache.size > LETTERS_CACHE_ENTRIES) lettersCache.remove(lettersCache.keys.first())
+                }
+            }
+        }
+        return result
+    }
+
+    /**
+     * The letter index [catalogLetters] last returned for this list in this
+     * session, for showing the rail at once while a fresh read runs.
+     */
+    suspend fun cachedCatalogLetters(
+        libraryId: Int?,
+        mediaType: String? = null,
+        order: String? = null,
+        queryGroups: List<CatalogQueryGroup> = emptyList(),
+        match: String? = null,
+    ): CatalogLettersV2? = lettersCacheMutex.withLock {
+        lettersCache[lettersKey(libraryId, mediaType, order, queryGroups, match)]
+    }
+
+    private fun lettersKey(
+        libraryId: Int?, mediaType: String?, order: String?,
+        queryGroups: List<CatalogQueryGroup>, match: String?,
+    ) = LettersKey(identityTransitions.generation.value, currentLanguageRevision, libraryId, mediaType, order, queryGroups, match)
 
     /**
      * A box set's movies in one library, in collection order. Live only: a box
@@ -236,15 +318,20 @@ class CatalogRepository(
      * Live item detail. By default it joins a Home warm-up already in flight
      * for the same title; [joinWarmup] = false sends a fresh request instead,
      * for a reload whose answer must postdate an access change.
+     *
+     * [fresh] reads the server only: it neither joins a warm-up nor falls back
+     * to the cache, both of which can still hold the state from before a write.
      */
     suspend fun getItemDetail(
         contentId: String,
         libraryId: Int? = null,
         joinWarmup: Boolean = true,
+        fresh: Boolean = false,
     ): ApiResult<ItemDetail> {
         if (libraryId != null) return catalogApi.getItemDetail(contentId, libraryId, artwork.request(ArtworkSurface.DETAIL))
         val requestIdentityGeneration = identityTransitions.generation.value
         val requestLanguageRevision = currentLanguageRevision
+        if (fresh) return fetchItemDetail(contentId, requestIdentityGeneration, requestLanguageRevision, serveCacheOnFailure = false)
         val warmRequest = if (!joinWarmup) null else detailRequestMutex.withLock {
             itemDetailInFlight[DetailRequestKey(requestIdentityGeneration, requestLanguageRevision, contentId)]
         }
@@ -446,6 +533,7 @@ class CatalogRepository(
         contentId: String,
         requestIdentityGeneration: Long,
         requestLanguageRevision: Long,
+        serveCacheOnFailure: Boolean = true,
     ): ApiResult<ItemDetail> {
         val sized = artwork.sizedRead(ArtworkSurface.DETAIL)
         val artworkFingerprint = artwork.cacheFingerprint(ArtworkSurface.DETAIL)
@@ -458,7 +546,7 @@ class CatalogRepository(
             }
             return result
         }
-        if (result.canServeCache()) {
+        if (serveCacheOnFailure && result.canServeCache()) {
             getCachedItemDetail(contentId)?.let { return ApiResult.Success(it) }
         }
         return result

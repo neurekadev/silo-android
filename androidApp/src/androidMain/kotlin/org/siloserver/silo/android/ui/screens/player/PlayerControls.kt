@@ -59,6 +59,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -73,7 +75,10 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import org.siloserver.silo.android.ui.components.LeftToRight
 import org.siloserver.silo.android.ui.components.SeekIntervalIcon
+import org.siloserver.silo.common.R as CommonR
+import java.util.Locale
 
 /**
  * Transport controls over the video, after iOS `MobilePlayerControls`:
@@ -110,10 +115,7 @@ fun PlayerControls(
     // the settings menu behind ⋯.
     hasQualityMenu: Boolean,
     chapters: List<org.siloserver.silo.model.catalog.VersionChapter> = emptyList(),
-    intro: org.siloserver.silo.model.catalog.TimeRange? = null,
-    credits: org.siloserver.silo.model.catalog.TimeRange? = null,
-    recap: org.siloserver.silo.model.catalog.TimeRange? = null,
-    preview: org.siloserver.silo.model.catalog.TimeRange? = null,
+    markers: org.siloserver.silo.domain.player.MarkerTimeline = org.siloserver.silo.domain.player.MarkerTimeline.EMPTY,
     isOrientationLocked: Boolean,
     orientationLockSupported: Boolean = true,
     tabletopMode: Boolean = false,
@@ -260,16 +262,14 @@ fun PlayerControls(
                     onSeek = onSeek,
                     enabled = seekEnabled,
                     chapters = chapters,
-                    intro = intro,
-                    credits = credits,
-                    recap = recap,
-                    preview = preview,
+                    markers = markers,
                     onScrubbingChange = {
                         isScrubbing = it
                         onScrubbingChange(it)
                     },
                     thumbnail = scrubThumbnail,
                     onScrubTarget = onScrubTarget,
+                    playbackSpeed = playbackSpeed,
                 )
                 PlayerActionPillRow(
                     hasTracks = hasTracks,
@@ -375,7 +375,7 @@ private fun PlayerTopBar(
     ) {
         PlayerIconDisc(
             icon = Icons.AutoMirrored.Rounded.ArrowBack,
-            contentDescription = "Back",
+            contentDescription = stringResource(CommonR.string.common_back),
             onClick = onBack,
         )
         Column(
@@ -402,7 +402,7 @@ private fun PlayerTopBar(
         if (pictureInPictureAvailable) {
             PlayerIconDisc(
                 icon = Icons.Rounded.PictureInPictureAlt,
-                contentDescription = "Picture in picture",
+                contentDescription = stringResource(CommonR.string.player_controls_pictureInPicture),
                 onClick = onEnterPictureInPicture,
             )
         }
@@ -410,7 +410,13 @@ private fun PlayerTopBar(
         if (orientationLockSupported) {
             PlayerIconDisc(
                 icon = if (isOrientationLocked) Icons.Rounded.ScreenLockRotation else Icons.Rounded.ScreenRotation,
-                contentDescription = if (isOrientationLocked) "Landscape locked" else "Rotate freely",
+                contentDescription = stringResource(
+                    if (isOrientationLocked) {
+                        CommonR.string.player_controls_landscapeLocked
+                    } else {
+                        CommonR.string.player_orientation_rotateFreely
+                    },
+                ),
                 onClick = onToggleOrientationLock,
             )
         }
@@ -440,64 +446,68 @@ private fun PlayerTransportControls(
     modifier: Modifier = Modifier,
 ) {
     val showPlay = isPaused || !isPlaying
-    Row(
-        modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(46.dp, Alignment.CenterHorizontally),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        PlayerDisc(
-            contentDescription = "Skip back $skipBackSeconds seconds",
-            onClick = onSkipBackward,
-            size = 54.dp,
-            enabled = seekEnabled,
+    // Transport stays left to right in every language: back on the left, as
+    // on the seek bar.
+    LeftToRight {
+        Row(
+            modifier = modifier,
+            horizontalArrangement = Arrangement.spacedBy(46.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            SeekIntervalIcon(
-                forward = false,
-                seconds = skipBackSeconds,
-                contentDescription = null,
-                tint = PlayerChrome.Paper,
-                modifier = Modifier.size(31.dp),
-            )
-        }
-        // While loading, the spinner stands where the disc was; the slot still
-        // plays or pauses, so a stall never takes the control away.
-        PlayerDisc(
-            contentDescription = if (showPlay) "Play" else "Pause",
-            onClick = onPlayPause,
-            size = 70.dp,
-            enabled = playPauseEnabled,
-            fill = if (isLoading) Color.Transparent else PlayerChrome.Paper,
-            contentColor = PlayerChrome.Ink,
-            stroke = Color.Transparent,
-            stateDescription = "Loading".takeIf { isLoading },
-        ) {
-            if (isLoading) {
-                PlayerLoadingSpinner()
-            } else {
-                Icon(
-                    imageVector = if (showPlay) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
+            PlayerDisc(
+                contentDescription = pluralStringResource(CommonR.plurals.player_controls_skipBack, skipBackSeconds, skipBackSeconds),
+                onClick = onSkipBackward,
+                size = 54.dp,
+                enabled = seekEnabled,
+            ) {
+                SeekIntervalIcon(
+                    forward = false,
+                    seconds = skipBackSeconds,
                     contentDescription = null,
-                    tint = PlayerChrome.Ink,
-                    // The play triangle's visual centre sits left of its box.
-                    modifier = Modifier
-                        .size(44.dp)
-                        .offset(x = if (showPlay) 2.dp else 0.dp),
+                    tint = PlayerChrome.Paper,
+                    modifier = Modifier.size(31.dp),
                 )
             }
-        }
-        PlayerDisc(
-            contentDescription = "Skip forward $skipForwardSeconds seconds",
-            onClick = onSkipForward,
-            size = 54.dp,
-            enabled = seekEnabled,
-        ) {
-            SeekIntervalIcon(
-                forward = true,
-                seconds = skipForwardSeconds,
-                contentDescription = null,
-                tint = PlayerChrome.Paper,
-                modifier = Modifier.size(31.dp),
-            )
+            // While loading, the spinner stands where the disc was; the slot still
+            // plays or pauses, so a stall never takes the control away.
+            PlayerDisc(
+                contentDescription = stringResource(if (showPlay) CommonR.string.player_controls_play else CommonR.string.player_controls_pause),
+                onClick = onPlayPause,
+                size = 70.dp,
+                enabled = playPauseEnabled,
+                fill = if (isLoading) Color.Transparent else PlayerChrome.Paper,
+                contentColor = PlayerChrome.Ink,
+                stroke = Color.Transparent,
+                stateDescription = stringResource(CommonR.string.common_loading).takeIf { isLoading },
+            ) {
+                if (isLoading) {
+                    PlayerLoadingSpinner()
+                } else {
+                    Icon(
+                        imageVector = if (showPlay) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
+                        contentDescription = null,
+                        tint = PlayerChrome.Ink,
+                        // The play triangle's visual centre sits left of its box.
+                        modifier = Modifier
+                            .size(44.dp)
+                            .offset(x = if (showPlay) 2.dp else 0.dp),
+                    )
+                }
+            }
+            PlayerDisc(
+                contentDescription = pluralStringResource(CommonR.plurals.player_controls_skipForward, skipForwardSeconds, skipForwardSeconds),
+                onClick = onSkipForward,
+                size = 54.dp,
+                enabled = seekEnabled,
+            ) {
+                SeekIntervalIcon(
+                    forward = true,
+                    seconds = skipForwardSeconds,
+                    contentDescription = null,
+                    tint = PlayerChrome.Paper,
+                    modifier = Modifier.size(31.dp),
+                )
+            }
         }
     }
 }
@@ -539,7 +549,7 @@ private fun PlayerActionPillRow(
             ) {
                 PlayerActionPill(
                     icon = Icons.Rounded.Subtitles,
-                    label = "Audio & Subtitles",
+                    label = stringResource(CommonR.string.player_tracks_title),
                     value = tracksValue.takeIf { density == ActionPillDensity.Full },
                     compact = density == ActionPillDensity.Icons,
                     enabled = hasTracks,
@@ -549,7 +559,7 @@ private fun PlayerActionPillRow(
                 if (hasChapters) {
                     PlayerActionPill(
                         icon = Icons.AutoMirrored.Rounded.FormatListBulleted,
-                        label = "Chapters",
+                        label = stringResource(CommonR.string.options_chapters),
                         value = chapterValue.takeIf { density == ActionPillDensity.Full },
                         compact = density == ActionPillDensity.Icons,
                         onClick = onOpenChapters,
@@ -560,7 +570,7 @@ private fun PlayerActionPillRow(
             if (hasQualityMenu) {
                 PlayerActionPill(
                     icon = Icons.Rounded.Tune,
-                    label = "Quality",
+                    label = stringResource(CommonR.string.options_quality),
                     value = qualityValue.takeIf { density != ActionPillDensity.Icons },
                     compact = density == ActionPillDensity.Icons,
                     onClick = onOpenQuality,
@@ -568,7 +578,7 @@ private fun PlayerActionPillRow(
             }
             PlayerIconDisc(
                 icon = Icons.Rounded.MoreHoriz,
-                contentDescription = "Playback settings",
+                contentDescription = stringResource(CommonR.string.player_controls_settings),
                 onClick = onOpenSettings,
                 size = 36.dp,
                 iconSize = 21.dp,
@@ -593,7 +603,7 @@ private fun TabletopUtilityRow(
     val brightnessControl: @Composable (Modifier) -> Unit = { modifier ->
         TabletopSliderControl(
             icon = Icons.Rounded.Brightness6,
-            contentDescription = "Player brightness",
+            contentDescription = stringResource(CommonR.string.player_controls_brightness),
             value = brightnessFraction,
             onValueChange = onSetBrightness,
             modifier = modifier,
@@ -635,7 +645,7 @@ private fun TabletopUtilityRow(
     ) {
         TabletopSliderControl(
             icon = Icons.AutoMirrored.Rounded.VolumeUp,
-            contentDescription = "Media volume",
+            contentDescription = stringResource(CommonR.string.player_controls_volume),
             value = volumeFraction,
             onValueChange = { fraction ->
                 volumeFraction = fraction
@@ -658,7 +668,8 @@ private fun TabletopUtilityRow(
         nextEpisode?.let { episode ->
             TabletopActionButton(
                 icon = Icons.Rounded.SkipNext,
-                label = "Next S${episode.seasonNumber}·E${episode.episodeNumber}",
+                // A `%d` code read without arguments: resources would print the app's digits (D75), codes stay ASCII (D78).
+                label = stringResource(CommonR.string.player_controls_nextEpisode).format(Locale.ROOT, episode.seasonNumber, episode.episodeNumber),
                 onClick = onPlayNextEpisode,
             )
         }
@@ -731,6 +742,6 @@ private fun TabletopActionButton(
 internal fun nextTabletopPlaybackSpeed(current: Double): Double =
     listOf(1.0, 1.25, 1.5, 2.0).firstOrNull { it > current + 0.001 } ?: 1.0
 
-internal fun playbackSpeedLabel(speed: Double): String {
-    return "${formatPlaybackSpeed(speed)}× Speed"
-}
+@Composable
+internal fun playbackSpeedLabel(speed: Double): String =
+    stringResource(CommonR.string.player_controls_speedButton, formatPlaybackSpeed(speed))

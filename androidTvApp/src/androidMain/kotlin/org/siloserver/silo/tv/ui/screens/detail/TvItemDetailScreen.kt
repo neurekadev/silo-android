@@ -1,5 +1,10 @@
 package org.siloserver.silo.tv.ui.screens.detail
 
+import org.siloserver.silo.common.i18n.LocaleFormat
+import org.siloserver.silo.common.i18n.displayUppercase
+import org.siloserver.silo.common.i18n.getStringWithNames
+import org.siloserver.silo.common.i18n.localizedResources
+import org.siloserver.silo.common.i18n.text
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -43,6 +48,7 @@ import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.HeartBroken
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.RemoveDone
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.Tv
@@ -112,6 +118,7 @@ import org.siloserver.silo.common.cards.LocalEpisodeSpoilerPrefs
 import org.siloserver.silo.common.ui.movieDirectorCredit
 import org.siloserver.silo.common.ui.openYoutubeTrailer
 import org.siloserver.silo.metadata.DescriptionTranslationPhase
+import org.siloserver.silo.model.catalog.isEpisodeDescriptionTranslating
 import org.siloserver.silo.model.catalog.hasMachineTranslatedOverview
 import org.siloserver.silo.model.catalog.pendingEpisodeTranslationLanguage
 import org.siloserver.silo.model.audiobook.AudiobookNarration
@@ -158,6 +165,18 @@ import org.siloserver.silo.watchtogether.WatchPartyDestination
 import org.siloserver.silo.tv.ui.theme.Spacing
 import org.siloserver.silo.tv.ui.theme.TvSmoothBringIntoViewSpec
 import org.siloserver.silo.viewmodel.WatchPartySpoilers
+import org.siloserver.silo.playback.detailPlaybackFileId
+import android.content.res.Resources
+import androidx.annotation.StringRes
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import org.siloserver.silo.common.i18n.stringResourceWithNames
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.i18n.currentNumberLocale
+import org.siloserver.silo.common.audiobook.AudiobookText
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 
 internal data class TvSeriesDetailRedirect(
     val seriesContentId: String,
@@ -367,7 +386,7 @@ fun TvItemDetailScreen(
             modifier = Modifier.background(MaterialTheme.colorScheme.background),
         )
         state.error != null && state.detail == null -> TvErrorScreen(
-            message = state.error!!,
+            message = state.error!!.text(),
             onRetry = viewModel::loadAll,
             modifier = Modifier.background(MaterialTheme.colorScheme.background),
         )
@@ -417,6 +436,8 @@ private fun TvDetailContent(
     onBoxSetMovie: (contentId: String, libraryId: String) -> Unit,
     shuffleLauncher: org.siloserver.silo.common.ui.ShuffleLauncher,
 ) {
+    val resources = localizedResources()
+    val configuration = LocalConfiguration.current
     val playFocus = remember { FocusRequester() }
     val heroActionFocus = remember(detail.contentId) { TvHeroActionFocus(playFocus) }
     val firstCastFocus = remember { FocusRequester() }
@@ -485,6 +506,18 @@ private fun TvDetailContent(
     ) {
         mutableStateOf(true)
     }
+    // The route's entry (a season, or an entry episode) takes the hero once,
+    // and never after the viewer chose Show Series Info. The page re-enters
+    // composition on back-stack pop, which restarts these effects, and Show
+    // Series Info restores the suggested episode as next up, which can be the
+    // entry episode again; neither may switch the hero back.
+    var entryHeroApplied by rememberSaveable(
+        detail.contentId,
+        initialSeasonNumber,
+        initialEpisodeContentId,
+    ) {
+        mutableStateOf(false)
+    }
     LaunchedEffect(
         initialSeasonNumber,
         initialEpisodeContentId,
@@ -493,6 +526,7 @@ private fun TvDetailContent(
         state.nextUpEpisode?.seasonNumber,
     ) {
         if (
+            !entryHeroApplied &&
             initialSeasonNumber != null &&
             initialEpisodeContentId == null &&
             state.selectedSeason == initialSeasonNumber &&
@@ -500,6 +534,7 @@ private fun TvDetailContent(
             (state.nextUpEpisode == null || state.nextUpEpisode.seasonNumber == initialSeasonNumber)
         ) {
             isShowingSeriesOverview = false
+            entryHeroApplied = true
         }
     }
     LaunchedEffect(
@@ -508,14 +543,16 @@ private fun TvDetailContent(
         state.nextUpEpisode?.contentId,
     ) {
         if (
+            !entryHeroApplied &&
             initialEpisodeContentId != null &&
             state.entryEpisodeSelectionApplied &&
             state.nextUpEpisode?.contentId == initialEpisodeContentId
         ) {
             isShowingSeriesOverview = false
+            entryHeroApplied = true
         }
     }
-    // tvOS treats Show / Season tabs, Episodes and the playback selector as a
+    // tvOS treats the season tabs, Episodes and the playback selector as a
     // single fixed first viewport. Supporting rails only begin vertical page
     // movement after focus leaves that complete primary region.
     val seriesPrimaryViewportActive = remember(detail.contentId) { mutableStateOf(false) }
@@ -683,8 +720,10 @@ private fun TvDetailContent(
         )
     }
     val audiobookParts = audiobookTimeline?.tracks.orEmpty()
-    val audiobookChapters = remember(audiobookTimeline) {
-        audiobookDisplayChapters(audiobookTimeline, detail.versions)
+    val audiobookTotalSeconds = AudiobookText.totalDurationSeconds(detail, audiobookTimeline?.totalSeconds)
+    // Keyed on the configuration too: the fallback chapter names are catalog text.
+    val audiobookChapters = remember(audiobookTimeline, resources, configuration) {
+        audiobookDisplayChapters(resources, audiobookTimeline, detail.versions)
     }
     val audiobookSeries = detail.audiobook?.series
     val audiobookOtherNarrations = detail.audiobook?.otherNarrations.orEmpty()
@@ -711,7 +750,7 @@ private fun TvDetailContent(
     val heroTitle = activeSeriesEpisode?.let { episode ->
         activeSeriesPlaybackDetail?.title
             ?: episode.title
-            ?: "Episode ${episode.episodeNumber}"
+            ?: resources.getString(CommonR.string.detail_episode, LocaleFormat.integer(episode.episodeNumber))
     } ?: detail.title
     // Spoiler protection: the focused episode's (or an episode page's)
     // description stays hidden until the profile starts it. The rail row's
@@ -737,22 +776,23 @@ private fun TvDetailContent(
     // replace the synopsis and playback target, but must never make Starring or
     // the controls underneath it jump to a different position.
     val heroCreditText = if (isSeriesDetail) {
-        seriesStarringCredit(detail)
+        seriesStarringNames(detail)?.let { stringResourceWithNames(CommonR.string.detail_starring, it) }
     } else {
         movieDirectorCredit(detail).takeIf { activeSeriesEpisode == null }
     }
-    val heroSourceTokens = activeSeriesEpisode?.let(TvDetailMetadata::seriesEpisodeSourceTokens)
-        ?: TvDetailMetadata.sourceTokens(detail)
+    val heroSourceTokens = activeSeriesEpisode?.let { TvDetailMetadata.seriesEpisodeSourceTokens(resources, it) }
+        ?: TvDetailMetadata.sourceTokens(resources, detail)
     val activeSeriesSelectedVersion = activeSeriesPlaybackDetail?.let { playbackDetail ->
         selectTvDetailDisplayVersion(
-            versions = playbackDetail.versions,
+            detail = playbackDetail,
             selectedFileId = state.selectedNextUpFileId,
-            lastFileId = playbackDetail.userData?.lastFileId,
+            selectedEditionId = state.selectedEditionId,
             preferredQuality = state.preferredQuality,
         )
     }
     val heroFactsLine = activeSeriesEpisode?.let { episode ->
         TvDetailMetadata.seriesEpisodeFactsLine(
+            resources = resources,
             episode = episode,
             runtimeMinutes = activeSeriesPlaybackDetail?.let { playbackDetail ->
                 selectedMediaRuntimeMinutes(playbackDetail, activeSeriesSelectedVersion)
@@ -760,9 +800,11 @@ private fun TvDetailContent(
             ratings = detail.titleRatings(),
         )
     } ?: TvDetailMetadata.factsLine(
+        resources = resources,
         detail = detail,
         preferredQuality = state.preferredQuality,
         selectedFileId = heroSelectedFileId,
+        selectedEditionId = state.selectedEditionId,
         includePlaybackFormats = false,
     )
     val heroArtwork = resolveTvDetailHeroArtwork(detail, state.nextUpEpisode, spoilerPrefs)
@@ -807,6 +849,7 @@ private fun TvDetailContent(
     val metadataAiStore: MetadataAiFeatureStore = koinInject()
     val metadataAiStatus by metadataAiStore.status.collectAsState()
     val translationPhase by viewModel.translationPhase.collectAsState()
+    val translatingSeasonContentId by viewModel.translatingSeasonContentId.collectAsState()
     // `auto` on-view mode fires once per (content, language); the
     // controller latches so recompositions can't re-queue jobs.
     LaunchedEffect(detail.contentId, detail.pendingTranslationLanguage, metadataAiStatus.onView) {
@@ -844,6 +887,19 @@ private fun TvDetailContent(
         hasMachineTranslatedOverview(detail.machineTranslatedFields) &&
             translationPhase != DescriptionTranslationPhase.Translating
     } && !heroOverview.isNullOrBlank()
+    // The focused episode's description while its season's job fills it. The
+    // loaded playback detail tracks the rail's pending language once loaded.
+    val activeEpisodeTranslating = activeSeriesEpisode != null && isEpisodeDescriptionTranslating(
+        pendingLanguage = if (activeSeriesPlaybackDetail != null) {
+            activeSeriesPlaybackDetail.pendingTranslationLanguage
+        } else {
+            activeSeriesEpisode.pendingTranslationLanguage
+        },
+        shownSeasonContentId = state.seasons
+            .firstOrNull { it.seasonNumber == activeSeriesEpisode.seasonNumber }
+            ?.contentId,
+        translatingContentId = translatingSeasonContentId,
+    )
     val translationSlot: (@Composable () -> Unit)? =
         if (detail.pendingTranslationLanguage != null &&
             (metadataAiStatus.onView == MetadataAiOnView.Button ||
@@ -925,7 +981,12 @@ private fun TvDetailContent(
                             state = state,
                             playFocus = playFocus,
                             onPlay = onPlay,
-                            overview = detail.overview,
+                            chapters = audiobookChapters.map { it.title to it.startSeconds },
+                            totalSeconds = audiobookTotalSeconds,
+                            pageSurface = pageSurfaceColor,
+                            onOpenChapters = { chaptersDialogOpen = true },
+                            onToggleFavorite = viewModel::onToggleFavorite,
+                            onToggleFinished = viewModel::onToggleWatched,
                         )
                     } else {
                         TvDetailHero(
@@ -944,10 +1005,16 @@ private fun TvDetailContent(
                             tagline = detail.tagline.takeIf { activeSeriesEpisode == null },
                             factsLine = heroFactsLine,
                             directorText = heroCreditText,
-                            translation = translationSlot.takeIf {
-                                activeSeriesEpisode == null && !hidesHeroOverview
+                            translation = when {
+                                hidesHeroOverview -> null
+                                activeSeriesEpisode == null -> translationSlot
+                                activeEpisodeTranslating -> {
+                                    { TvTranslatingDescriptionLabel() }
+                                }
+                                else -> null
                             },
-                            machineTranslated = heroMachineTranslated && !hidesHeroOverview,
+                            machineTranslated = heroMachineTranslated && !hidesHeroOverview &&
+                                !activeEpisodeTranslating,
                             compactSeries = isSeriesDetail,
                             playbackSummary = {
                                 TvDetailPlaybackSelectionSummary(
@@ -956,11 +1023,11 @@ private fun TvDetailContent(
                                 )
                             },
                             actions = {
-                                // Series keeps the full action row in both Show
-                                // and Season browsing modes. Because episode
-                                // focus updates state.nextUpEpisode, Play/Resume
-                                // always follows the focused episode while the
-                                // other Show-level actions stay available.
+                                // Series keeps the full action row whether the
+                                // hero shows the series or an episode. Because
+                                // episode focus updates state.nextUpEpisode,
+                                // Play/Resume always follows the focused episode
+                                // while the series-level actions stay available.
                                 HeroActionRow(
                                     detail = detail,
                                     state = state,
@@ -972,7 +1039,7 @@ private fun TvDetailContent(
                                     libraryId = libraryId,
                                     onWatchParty = onWatchParty,
                                     // Season mode marks the selected season;
-                                    // Show mode offers only the whole series.
+                                    // the series overview offers only the whole series.
                                     watchedSeason = state.seasons
                                         .firstOrNull { it.seasonNumber == state.selectedSeason }
                                         ?.takeIf { isSeriesDetail && !isShowingSeriesOverview && it.episodeCount > 0 },
@@ -1005,6 +1072,17 @@ private fun TvDetailContent(
                                             season.contentId,
                                         )
                                     },
+                                    // As on tvOS, More > Show Series Info is the
+                                    // way back from an episode to the series.
+                                    onShowSeriesInfo = if (isSeriesDetail && !isShowingSeriesOverview) {
+                                        {
+                                            isShowingSeriesOverview = true
+                                            entryHeroApplied = true
+                                            viewModel.onSeriesEpisodeActivated(null)
+                                        }
+                                    } else {
+                                        null
+                                    },
                                 )
                             },
                         )
@@ -1021,6 +1099,22 @@ private fun TvDetailContent(
                         modifier = Modifier,
                         verticalArrangement = Arrangement.spacedBy(TvDetailSectionGap),
                     ) {
+                        // tvOS About: the description beside the book's facts,
+                        // the first stop below the hero (Chapters moved into the
+                        // hero's action row).
+                        if (isAudiobook) {
+                            val aboutFacts = AudiobookText.facts(resources, detail, audiobookTotalSeconds, audiobookParts.size)
+                            if (!detail.overview.isNullOrBlank() || aboutFacts.isNotEmpty()) {
+                                TvAudiobookAboutSection(
+                                    overview = detail.overview?.trim().orEmpty(),
+                                    facts = aboutFacts,
+                                    upFocusRequester = playFocus,
+                                    onDirectionUp = returnToHero,
+                                    modifier = Modifier.padding(horizontal = Spacing.safeArea),
+                                )
+                            }
+                        }
+
                         if (isAudiobook && audiobookParts.size > 1) {
                             TvAudiobookPartsSection(
                                 tracks = audiobookParts,
@@ -1046,19 +1140,11 @@ private fun TvDetailContent(
                             )
                         }
 
-                        if (isAudiobook && audiobookChapters.isNotEmpty()) {
-                            TvAudiobookChaptersSection(
-                                chapters = audiobookChapters,
-                                onOpenChapters = { chaptersDialogOpen = true },
-                                upFocusRequester = if (audiobookParts.size > 1) null else playFocus,
-                                onDirectionUp = returnToHero,
-                                modifier = Modifier.padding(horizontal = Spacing.safeArea),
-                            )
-                        }
 
                         if (isAudiobook && audiobookSeries?.entries?.isNotEmpty() == true) {
                             TvAudiobookRelatedRailSection(
-                                title = audiobookSeries.name.takeIf { it.isNotBlank() } ?: "Series",
+                                title = audiobookSeries.name.takeIf { it.isNotBlank() }
+                                    ?: stringResource(CommonR.string.detail_audiobook_series),
                                 items = audiobookSeries.entries,
                                 onItemDetail = onItemDetail,
                                 upFocusRequester = playFocus,
@@ -1079,7 +1165,7 @@ private fun TvDetailContent(
 
                         if (isAudiobook && audiobookAlsoByAuthor.isNotEmpty()) {
                             TvAudiobookRelatedRailSection(
-                                title = "More by Author",
+                                title = stringResource(CommonR.string.detail_audiobook_moreByAuthor),
                                 items = audiobookAlsoByAuthor,
                                 onItemDetail = onItemDetail,
                                 upFocusRequester = playFocus,
@@ -1090,7 +1176,7 @@ private fun TvDetailContent(
 
                         if (isAudiobook && (audiobookRelated.isNotEmpty() || audiobookFallbackRelated.isNotEmpty())) {
                             TvAudiobookRelatedRailSection(
-                                title = "Related",
+                                title = stringResource(CommonR.string.detail_audiobook_related),
                                 items = audiobookRelated.ifEmpty { audiobookFallbackRelated },
                                 onItemDetail = onItemDetail,
                                 upFocusRequester = playFocus,
@@ -1147,11 +1233,6 @@ private fun TvDetailContent(
                                 entryEpisodeContentId = initialEpisodeContentId
                                     ?.takeUnless { state.entryEpisodeSelectionApplied },
                                 showsSeasonChips = showsSeasonChips,
-                                isShowingSeriesOverview = isShowingSeriesOverview,
-                                onShowSelected = {
-                                    isShowingSeriesOverview = true
-                                    viewModel.onSeriesEpisodeActivated(null)
-                                },
                                 onReturnToHero = returnToHero,
                                 onReturnToHeroAction = if (isSeriesDetail) {
                                     {
@@ -1376,7 +1457,9 @@ private fun TvDetailContent(
                                     .detailBodySectionAnchor(listState, coroutineScope),
                                 verticalArrangement = Arrangement.spacedBy(20.dp),
                             ) {
-                                val similarTitle = if (isSeriesDetail) "Recommended Series" else "Related Movies"
+                                val similarTitle = stringResource(
+                                    if (isSeriesDetail) CommonR.string.detail_recommendedSeries else CommonR.string.detail_relatedMovies,
+                                )
                                 TvDetailSectionHeader(
                                     title = similarTitle,
                                     modifier = Modifier.padding(horizontal = TvDetailHorizontalInset),
@@ -1469,7 +1552,7 @@ private fun TvDetailContent(
 
         if (chaptersDialogOpen && audiobookChapters.isNotEmpty()) {
             TvOptionDialog(
-                title = "Chapters",
+                title = stringResource(CommonR.string.detail_audiobook_chapters),
                 options = audiobookChapters.mapIndexed { index, chapter ->
                     TvDialogOption(
                         key = "chapter-$index",
@@ -1526,23 +1609,30 @@ private fun TvDetailPlaybackSelectionSummary(
     val selectedSubtitleIndex =
         if (usesNextUp) state.selectedNextUpSubtitleIndex else state.selectedSubtitleIndex
     val selectedVersion = remember(
-        versions,
+        playbackDetail,
         selectedFileId,
-        playbackDetail?.userData?.lastFileId,
+        state.selectedEditionId,
         state.preferredQuality,
     ) {
         selectTvDetailDisplayVersion(
-            versions = versions,
+            detail = playbackDetail,
             selectedFileId = selectedFileId,
-            lastFileId = playbackDetail?.userData?.lastFileId,
+            selectedEditionId = state.selectedEditionId,
             preferredQuality = state.preferredQuality,
         )
     }
-    val compactVersion = selectedVersion?.let(TvPlaybackFormatting::versionCompactLabel)
+    val text = rememberTvPlaybackText()
+    val resources = localizedResources()
+    // The readout writes every resolved Auto the same way ("Auto · English").
+    val readoutText = remember(text, resources) {
+        val autoValue = { value: String -> resources.getString(CommonR.string.detail_autoValue, value) }
+        text.copy(autoResolved = autoValue, autoTrack = autoValue)
+    }
+    val compactVersion = selectedVersion?.let { TvPlaybackFormatting.versionCompactLabel(it, text) }
     val versionValue = if (selectedVersion == null) {
         null
-    } else if (selectedFileId == null && compactVersion != "Auto") {
-        "Auto · $compactVersion"
+    } else if (selectedFileId == null && compactVersion != text.auto) {
+        readoutText.autoResolved(compactVersion.orEmpty())
     } else {
         compactVersion
     }
@@ -1550,13 +1640,14 @@ private fun TvDetailPlaybackSelectionSummary(
     val automaticAudioResolutionKnown = state.audioSelectionCapabilities != null
     val audioValue = selectedVersion?.let { version ->
         if (selectedAudioIndex == null && !automaticAudioResolutionKnown) {
-            "Auto"
+            text.auto
         } else {
             TvPlaybackFormatting.audioValueLabel(
                 version = version,
                 selectedAudioTrackIndex = selectedAudioIndex,
                 automaticAudioTrackOrdinal = automaticAudioTrackOrdinal,
-            ).replace("Auto: ", "Auto · ")
+                text = readoutText,
+            )
         }
     }
     val subtitleValue = selectedVersion?.let { version ->
@@ -1575,7 +1666,8 @@ private fun TvDetailPlaybackSelectionSummary(
             } else {
                 null
             },
-        ).replace("Auto - ", "Auto · ")
+            text = readoutText,
+        )
     }
 
     // Retain presentation only while the next episode resolves. Playback and
@@ -1598,17 +1690,17 @@ private fun TvDetailPlaybackSelectionSummary(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         TvPlaybackSummaryItem(
-            label = "VERSION",
+            label = stringResource(CommonR.string.detail_readout_version),
             value = displayedValues.first,
             itemWidth = TV_PLAYBACK_VERSION_ITEM_WIDTH,
         )
         TvPlaybackSummaryItem(
-            label = "AUDIO",
+            label = stringResource(CommonR.string.detail_readout_audio),
             value = displayedValues.second,
             itemWidth = TV_PLAYBACK_AUDIO_ITEM_WIDTH,
         )
         TvPlaybackSummaryItem(
-            label = "SUBTITLES",
+            label = stringResource(CommonR.string.detail_readout_subtitles),
             value = displayedValues.third,
             itemWidth = TV_PLAYBACK_SUBTITLE_ITEM_WIDTH,
         )
@@ -1684,7 +1776,8 @@ private val TV_PLAYBACK_VERSION_ITEM_WIDTH = 156.5.dp
 private val TV_PLAYBACK_AUDIO_ITEM_WIDTH = 182.dp
 private val TV_PLAYBACK_SUBTITLE_ITEM_WIDTH = 169.dp
 
-internal fun seriesStarringCredit(detail: ItemDetail): String? {
+/** The first three cast names, for the series "Starring …" credit. */
+internal fun seriesStarringNames(detail: ItemDetail): String? {
     val names = detail.cast
         .asSequence()
         .filter { it.name.isNotBlank() }
@@ -1693,7 +1786,7 @@ internal fun seriesStarringCredit(detail: ItemDetail): String? {
         .distinct()
         .take(3)
         .toList()
-    return names.takeIf { it.isNotEmpty() }?.joinToString(", ", prefix = "Starring ")
+    return names.takeIf { it.isNotEmpty() }?.joinToString(", ")
 }
 
 /**
@@ -1754,7 +1847,10 @@ private fun HeroActionRow(
     onShuffleSeries: (() -> Unit)? = null,
     shuffleSeason: org.siloserver.silo.model.catalog.Season? = null,
     onShuffleSeason: (org.siloserver.silo.model.catalog.Season) -> Unit = {},
+    /** Series page only, while the hero shows an episode: returns it to the series. */
+    onShowSeriesInfo: (() -> Unit)? = null,
 ) {
+    val resources = localizedResources()
     val watchPartyEntry = rememberTvWatchPartyDetailEntry()
     var moreOpen by remember(detail.contentId) { mutableStateOf(false) }
     var playLaunchPending by remember(detail.contentId) { mutableStateOf(false) }
@@ -1782,7 +1878,10 @@ private fun HeroActionRow(
     // For series/season we must NOT fall back to playing the container — Play is
     // a no-op until the next-up episode resolves (episodes still loading, or an
     // empty/error season). Movie/episode are always ready.
-    val playReady = !isSeriesOrSeason || (nextUp != null && state.nextUpTargetReady)
+    // A card seed (state.isProvisional) has no files or watch state yet, so
+    // Play and the More menu wait for the fetched detail.
+    val playReady = !state.isProvisional &&
+        (!isSeriesOrSeason || (nextUp != null && state.nextUpTargetReady))
     val containerResume = remember(detail.userData) { detail.resumePositionSeconds() }
     val nextUpResume = remember(nextUp?.userData) { nextUp?.userData?.resumePositionSeconds() }
     val resumePosition = if (isSeriesOrSeason) nextUpResume else containerResume
@@ -1812,21 +1911,17 @@ private fun HeroActionRow(
         if (isSeriesOrSeason) state.nextUpAudioPickedThisSession else state.audioPickedThisSession
     val selectorSubtitleIndex =
         if (isSeriesOrSeason) state.selectedNextUpSubtitleIndex else state.selectedSubtitleIndex
-    val selectorLastFileId = if (isSeriesOrSeason) {
-        nextUpDetail?.userData?.lastFileId
-    } else {
-        detail.userData?.lastFileId
-    }
+    val selectorDetail = if (isSeriesOrSeason) nextUpDetail else detail
     val selectedVersion = remember(
-        selectorVersions,
+        selectorDetail,
         selectorSelectedFileId,
-        selectorLastFileId,
+        state.selectedEditionId,
         state.preferredQuality,
     ) {
         selectTvDetailDisplayVersion(
-            versions = selectorVersions,
+            detail = selectorDetail,
             selectedFileId = selectorSelectedFileId,
-            lastFileId = selectorLastFileId,
+            selectedEditionId = state.selectedEditionId,
             preferredQuality = state.preferredQuality,
         )
     }
@@ -1841,6 +1936,7 @@ private fun HeroActionRow(
             subtitle = if (detail.type == "episode") {
                 listOfNotNull(
                     detail.seriesTitle,
+                    // Sent to the server for the party: English data.
                     detail.seasonNumber?.let { season -> detail.episodeNumber?.let { "S${season}E$it" } },
                 ).joinToString(" · ")
             } else {
@@ -1854,6 +1950,8 @@ private fun HeroActionRow(
         detail.type == "series" && nextUp != null && playReady -> tvWatchPartyItem(
             contentId = nextUp.contentId,
             contentType = "episode",
+            // The party item is sent to the server and shown to every
+            // member, so its fallback text stays English data.
             title = nextUp.title?.takeIf { it.isNotBlank() } ?: "Episode ${nextUp.episodeNumber}",
             subtitle = "${detail.title} · S${nextUp.seasonNumber}E${nextUp.episodeNumber}",
             posterUrl = nextUp.stillUrl ?: detail.posterUrl,
@@ -1896,7 +1994,12 @@ private fun HeroActionRow(
             )
         },
     )
-    val playFileId = selectorSelectedFileId ?: selectedFileId.takeIf { hasTrackOverride }
+    val playFileId = detailPlaybackFileId(
+        displayed = selectedVersion,
+        pinned = selectorSelectedFileId != null,
+        tracksPicked = hasTrackOverride,
+        lastFileId = selectorDetail?.userData?.lastFileId,
+    )
     // Only a version the viewer picked pins the file; a track override's file is the automatic one.
     val playVersionChosen = selectorSelectedFileId != null
     // No separate next-up autofocus: the Play button is always rendered and
@@ -1930,13 +2033,18 @@ private fun HeroActionRow(
                 TvPrimaryPillButton(
                     stableHero = true,
                     icon = Icons.Filled.PlayArrow,
-                    title = playButtonLabel(
-                        isSeriesOrSeason = isSeriesOrSeason,
-                        seriesContainer = detail.type == "series",
-                        nextUp = nextUp,
-                        hasResume = hasResume,
-                        resumePosition = resumePosition,
-                    ),
+                    title = if (state.isProvisional) {
+                        stringResource(CommonR.string.common_loading)
+                    } else {
+                        playButtonLabel(
+                            resources = resources,
+                            isSeriesOrSeason = isSeriesOrSeason,
+                            seriesContainer = detail.type == "series",
+                            nextUp = nextUp,
+                            hasResume = hasResume,
+                            resumePosition = resumePosition,
+                        )
+                    },
                     onClick = {
                         if (playReady && !playLaunchPending) {
                             playLaunchPending = true
@@ -1970,8 +2078,8 @@ private fun HeroActionRow(
                     TvSquareToggleButton(
                         icon = Icons.Filled.SkipPrevious,
                         iconActive = Icons.Filled.SkipPrevious,
-                        contentDescription = "Start Over",
-                        titleOnFocus = "Start Over",
+                        contentDescription = stringResource(CommonR.string.detail_startOver),
+                        titleOnFocus = stringResource(CommonR.string.detail_startOver),
                         isActive = false,
                         modifier = Modifier.rememberHeroAction(focus, focus.startOver),
                         focusRequester = focus.startOver,
@@ -2008,10 +2116,16 @@ private fun HeroActionRow(
                             audioLanguage = audioLanguage,
                         )
                     },
+                    preferredQuality = state.preferredQuality,
                     onSelectVersion = if (isSeriesOrSeason) {
                         viewModel::onNextUpVersionSelected
                     } else {
                         viewModel::onVersionSelected
+                    },
+                    onSelectEdition = if (isSeriesOrSeason) {
+                        viewModel::onNextUpEditionSelected
+                    } else {
+                        viewModel::onEditionSelected
                     },
                     onSelectAudioTrack = if (isSeriesOrSeason) {
                         viewModel::onNextUpAudioTrackSelected
@@ -2036,23 +2150,23 @@ private fun HeroActionRow(
                     iconActive = Icons.Filled.Bookmark,
                     isActive = state.inWatchlist,
                     contentDescription = if (state.inWatchlist) {
-                        "Remove from watchlist"
+                        stringResource(CommonR.string.detail_watchlistRemove)
                     } else {
-                        "Add to watchlist"
+                        stringResource(CommonR.string.detail_watchlistAdd)
                     },
                     onClick = viewModel::onToggleWatchlist,
                     modifier = Modifier.rememberHeroAction(focus, focus.watchlist),
                     focusRequester = focus.watchlist,
-                    titleOnFocus = "Watchlist",
+                    titleOnFocus = stringResource(CommonR.string.detail_watchlist),
                 )
 
                 TvSquareToggleButton(
                     icon = Icons.Filled.MoreHoriz,
                     iconActive = Icons.Filled.MoreHoriz,
                     isActive = false,
-                    contentDescription = "More options",
-                    titleOnFocus = "More",
-                    onClick = { moreOpen = true },
+                    contentDescription = stringResource(CommonR.string.detail_moreOptions),
+                    titleOnFocus = stringResource(CommonR.string.detail_more),
+                    onClick = { if (!state.isProvisional) moreOpen = true },
                     modifier = Modifier.rememberHeroAction(focus, focus.more),
                     focusRequester = focus.more,
                 )
@@ -2067,7 +2181,7 @@ private fun HeroActionRow(
                 add(
                     TvDialogOption(
                         key = "shuffle-series",
-                        title = "Shuffle Series",
+                        title = resources.getString(CommonR.string.detail_more_shuffleSeries),
                         icon = Icons.Rounded.Shuffle,
                         onClick = {
                             moreOpen = false
@@ -2080,7 +2194,10 @@ private fun HeroActionRow(
                 add(
                     TvDialogOption(
                         key = "shuffle-season",
-                        title = "Shuffle ${tvSeasonPickerLabel(season)}",
+                        title = resources.getString(
+                            CommonR.string.detail_more_shuffleSeason,
+                            tvSeasonPickerLabel(resources, season),
+                        ),
                         icon = Icons.Rounded.Shuffle,
                         onClick = {
                             moreOpen = false
@@ -2089,10 +2206,26 @@ private fun HeroActionRow(
                     ),
                 )
             }
+            // tvOS places this right after Shuffle.
+            onShowSeriesInfo?.let { showSeriesInfo ->
+                add(
+                    TvDialogOption(
+                        key = "show-series-info",
+                        title = resources.getString(CommonR.string.detail_more_showSeriesInfo),
+                        icon = Icons.Rounded.Info,
+                        onClick = {
+                            moreOpen = false
+                            showSeriesInfo()
+                        },
+                    ),
+                )
+            }
             add(
                 TvDialogOption(
                     key = "favorite",
-                    title = if (state.isFavorite) "Remove from Favorites" else "Add to Favorites",
+                    title = resources.getString(
+                        if (state.isFavorite) CommonR.string.detail_more_removeFavorite else CommonR.string.detail_more_addFavorite,
+                    ),
                     // Actions take icons, not checks: a check means "selected".
                     icon = if (state.isFavorite) Icons.Rounded.HeartBroken else Icons.Rounded.FavoriteBorder,
                     onClick = {
@@ -2104,7 +2237,9 @@ private fun HeroActionRow(
             add(
                 TvDialogOption(
                     key = "watched",
-                    title = if (state.isWatched) watchedUnmarkLabel(detail) else watchedMarkLabel(detail),
+                    title = resources.getString(
+                        if (state.isWatched) watchedUnmarkLabel(detail) else watchedMarkLabel(detail),
+                    ),
                     icon = if (state.isWatched) Icons.Rounded.RemoveDone else Icons.Rounded.CheckCircleOutline,
                     onClick = {
                         moreOpen = false
@@ -2117,8 +2252,14 @@ private fun HeroActionRow(
                 add(
                     TvDialogOption(
                         key = "season-watched",
-                        title = "Mark ${tvSeasonPickerLabel(season)} " +
-                            if (seasonWatched) "Unwatched" else "Watched",
+                        title = resources.getStringWithNames(
+                            if (seasonWatched) {
+                                CommonR.string.detail_more_markNamedSeasonUnwatched
+                            } else {
+                                CommonR.string.detail_more_markNamedSeasonWatched
+                            },
+                            tvSeasonPickerLabel(resources, season),
+                        ),
                         icon = if (seasonWatched) Icons.Rounded.RemoveDone else Icons.Rounded.CheckCircleOutline,
                         onClick = {
                             moreOpen = false
@@ -2150,7 +2291,7 @@ private fun HeroActionRow(
                             add(
                                 TvDialogOption(
                                     key = "season-$season",
-                                    title = "Go to Season $season",
+                                    title = resources.getString(CommonR.string.detail_more_goToSeason, season),
                                     subtitle = detail.seriesTitle,
                                     icon = Icons.Rounded.VideoLibrary,
                                     onClick = {
@@ -2164,7 +2305,7 @@ private fun HeroActionRow(
                     add(
                         TvDialogOption(
                             key = "series",
-                            title = "Go to Series",
+                            title = resources.getString(CommonR.string.detail_goToSeries),
                             subtitle = detail.seriesTitle,
                             icon = Icons.Rounded.Tv,
                             onClick = {
@@ -2177,7 +2318,7 @@ private fun HeroActionRow(
             }
         }
         TvOptionDialog(
-            title = "More Actions",
+            title = stringResource(CommonR.string.detail_more_title),
             options = options,
             onDismiss = { moreOpen = false },
             // Shuffle is first and takes focus over a selected toggle below it.
@@ -2218,9 +2359,9 @@ internal fun seriesEpisodePlaybackLaunch(
     val audioTrackIndex = state.selectedNextUpAudioIndex.takeIf { selectionMatchesEpisode }
     val subtitleTrackIndex = state.selectedNextUpSubtitleIndex.takeIf { selectionMatchesEpisode }
     val selectedVersion = selectTvDetailDisplayVersion(
-        versions = versions,
+        detail = playbackDetail,
         selectedFileId = explicitFileId,
-        lastFileId = playbackDetail?.userData?.lastFileId,
+        selectedEditionId = state.selectedEditionId.takeIf { selectionMatchesEpisode },
         preferredQuality = state.preferredQuality,
     )
     val automaticAudioTrackOrdinal = state.automaticAudioOrdinal(playbackDetail, selectedVersion)
@@ -2243,7 +2384,12 @@ internal fun seriesEpisodePlaybackLaunch(
         },
     )
     return SeriesEpisodePlaybackLaunch(
-        fileId = explicitFileId ?: selectedVersion?.fileId?.takeIf { hasTrackOverride },
+        fileId = detailPlaybackFileId(
+            displayed = selectedVersion,
+            pinned = explicitFileId != null,
+            tracksPicked = hasTrackOverride,
+            lastFileId = playbackDetail?.userData?.lastFileId,
+        ),
         versionChosen = explicitFileId != null,
         // Only a pick travels; Auto is resolved by the start (see the hero row).
         audioTrackIndex = audioTrackIndex,
@@ -2253,20 +2399,22 @@ internal fun seriesEpisodePlaybackLaunch(
     )
 }
 
-private fun watchedMarkLabel(detail: ItemDetail): String = when (detail.type) {
-    "series" -> "Mark Series Watched"
-    "season" -> "Mark Season Watched"
-    "episode" -> "Mark Episode Watched"
-    "movie" -> "Mark Movie Watched"
-    else -> "Mark as Watched"
+@StringRes
+private fun watchedMarkLabel(detail: ItemDetail): Int = when (detail.type) {
+    "series" -> CommonR.string.detail_more_markSeriesWatched
+    "season" -> CommonR.string.detail_more_markSeasonWatched
+    "episode" -> CommonR.string.detail_more_markEpisodeWatched
+    "movie" -> CommonR.string.detail_more_markMovieWatched
+    else -> CommonR.string.detail_more_markWatched
 }
 
-private fun watchedUnmarkLabel(detail: ItemDetail): String = when (detail.type) {
-    "series" -> "Mark Series Unwatched"
-    "season" -> "Mark Season Unwatched"
-    "episode" -> "Mark Episode Unwatched"
-    "movie" -> "Mark Movie Unwatched"
-    else -> "Mark as Unwatched"
+@StringRes
+private fun watchedUnmarkLabel(detail: ItemDetail): Int = when (detail.type) {
+    "series" -> CommonR.string.detail_more_markSeriesUnwatched
+    "season" -> CommonR.string.detail_more_markSeasonUnwatched
+    "episode" -> CommonR.string.detail_more_markEpisodeUnwatched
+    "movie" -> CommonR.string.detail_more_markMovieUnwatched
+    else -> CommonR.string.detail_more_markUnwatched
 }
 
 /** Tiny breathing room between the fixed hero controls and the series modes. */
@@ -2277,8 +2425,6 @@ private fun EpisodesSection(
     state: TvItemDetailUiState,
     entryEpisodeContentId: String?,
     showsSeasonChips: Boolean,
-    isShowingSeriesOverview: Boolean,
-    onShowSelected: () -> Unit,
     onReturnToHero: () -> Boolean,
     onReturnToHeroAction: (() -> Boolean)? = null,
     onSeasonSelected: (org.siloserver.silo.model.catalog.Season) -> Unit,
@@ -2300,14 +2446,14 @@ private fun EpisodesSection(
                 verticalAlignment = Alignment.Bottom,
             ) {
                 TvDetailSectionHeader(
-                    eyebrow = episodeEyebrowLabel(detail, state),
-                    title = "Episodes",
+                    eyebrow = episodeEyebrowLabel(localizedResources(), detail, state),
+                    title = stringResource(CommonR.string.detail_episodes_title),
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 val count = state.episodes.size
                 if (count > 0) {
                     Text(
-                        text = "$count episode${if (count == 1) "" else "s"}",
+                        text = pluralStringResource(CommonR.plurals.detail_episodeCount, count, count, LocaleFormat.integer(count)),
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.Medium,
                             fontSize = 16.sp,
@@ -2322,9 +2468,7 @@ private fun EpisodesSection(
             if (isSeries) {
                 TvSeriesModePicker(
                     seasons = state.seasons,
-                    isShowingSeriesOverview = isShowingSeriesOverview,
                     selectedSeason = state.selectedSeason,
-                    onShowSelected = onShowSelected,
                     onSeasonSelected = onSeasonSelected,
                     // Return to the hero action the viewer left, else Play.
                     onDirectionUp = onReturnToHeroAction ?: onReturnToHero,
@@ -2373,7 +2517,7 @@ private fun EpisodesSection(
                 // (T15a).
                 railEpisodes.isEmpty() -> {
                     Text(
-                        text = "No episodes available",
+                        text = stringResource(CommonR.string.detail_episodes_empty),
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Medium),
                         color = Color.White.copy(alpha = 0.55f),
                         modifier = Modifier.padding(horizontal = TvDetailHorizontalInset, vertical = 8.dp),
@@ -2428,17 +2572,22 @@ internal fun currentEpisodeRailContentId(
         else -> null
     }
 
-internal fun episodeEyebrowLabel(detail: ItemDetail, state: TvItemDetailUiState): String {
+internal fun episodeEyebrowLabel(resources: Resources, detail: ItemDetail, state: TvItemDetailUiState): String {
+    fun seasonLabel(specials: Boolean, number: Int): String = if (specials) {
+        resources.getString(CommonR.string.detail_specials)
+    } else {
+        resources.getString(CommonR.string.detail_season, LocaleFormat.integer(number))
+    }
     state.seasons
         .firstOrNull { it.seasonNumber == state.selectedSeason }
         ?.let { season ->
-            return if (season.isSpecialsForDisplay()) "Specials" else "Season ${season.seasonNumber}"
+            return seasonLabel(season.isSpecialsForDisplay(), season.seasonNumber)
         }
-    state.selectedSeason?.let { return if (it == 0) "Specials" else "Season $it" }
+    state.selectedSeason?.let { return seasonLabel(it == 0, it) }
     if (detail.type == "episode") {
-        detail.seasonNumber?.let { return if (it == 0) "Specials" else "Season $it" }
+        detail.seasonNumber?.let { return seasonLabel(it == 0, it) }
     }
-    return "This Season"
+    return resources.getString(CommonR.string.detail_thisSeason)
 }
 
 @Composable
@@ -2462,7 +2611,7 @@ private fun DetailsSection(
             .padding(horizontal = TvDetailsFocusInset, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(28.dp),
     ) {
-        TvDetailSectionHeader(title = "Details")
+        TvDetailSectionHeader(title = stringResource(CommonR.string.detail_details))
         TvDetailFactsTable(detail = detail)
     }
 }
@@ -2486,13 +2635,14 @@ private fun TvAudiobookPartsSection(
         modifier = modifier.widthIn(max = 720.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        TvDetailSectionHeader(title = "Parts")
+        TvDetailSectionHeader(title = stringResource(CommonR.string.detail_audiobook_parts))
+        val resources = localizedResources()
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             tracks.forEachIndexed { index, track ->
                 val version = versions.firstOrNull { it.fileId == track.fileId }
                 TvAudiobookDetailActionRow(
-                    title = audiobookPartTitle(version, track.index),
-                    subtitle = audiobookPartSubtitle(version),
+                    title = audiobookPartTitle(resources, version, track.index),
+                    subtitle = audiobookPartSubtitle(resources, version),
                     trailing = audiobookDurationLabel(track.durationSeconds),
                     onClick = { onPartSelected(track) },
                     upFocusRequester = if (index == 0) firstRowUpFocusRequester else null,
@@ -2502,27 +2652,130 @@ private fun TvAudiobookPartsSection(
     }
 }
 
+/**
+ * tvOS `TVAudiobookDetailSections.aboutSection`: one full-width focus stop
+ * holding the description beside the book's facts. Select shows the whole
+ * description in place (tvOS opens it full screen) when it is cut off; a
+ * description taller than the card scrolls with Down and Up before focus
+ * leaves the card.
+ */
+/** Tall enough for most descriptions, short enough to stay on one screen with its heading. */
+private val AboutExpandedMaxHeight = 300.dp
+
+/** About three lines of the description per Down or Up. */
+private val AboutScrollStep = 63.dp
+
 @Composable
-private fun TvAudiobookChaptersSection(
-    chapters: List<TvAudiobookDisplayChapter>,
-    onOpenChapters: () -> Unit,
+private fun TvAudiobookAboutSection(
+    overview: String,
+    facts: List<Pair<String, String>>,
     upFocusRequester: FocusRequester?,
     onDirectionUp: (() -> Boolean)?,
     modifier: Modifier = Modifier,
 ) {
+    var expanded by remember(overview) { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    val textScroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    val scrollStep = with(LocalDensity.current) { AboutScrollStep.toPx() }
+    LaunchedEffect(expanded) { if (!expanded) textScroll.scrollTo(0) }
     Column(
-        modifier = modifier.widthIn(max = 720.dp),
+        modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        TvDetailSectionHeader(title = "Chapters")
-        TvAudiobookDetailActionRow(
-            title = "Chapter list",
-            subtitle = "${chapters.size} chapters",
-            trailing = "Open",
-            onClick = onOpenChapters,
-            upFocusRequester = upFocusRequester,
-            onDirectionUp = onDirectionUp,
-        )
+        TvDetailSectionHeader(title = stringResource(CommonR.string.audiobook_about_title))
+        Surface(
+            onClick = { expanded = !expanded },
+            interactionSource = interactionSource,
+            shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(10.dp)),
+            colors = ClickableSurfaceDefaults.colors(
+                containerColor = Color.Transparent,
+                contentColor = Color.White,
+                focusedContainerColor = Color.White.copy(alpha = 0.08f),
+                focusedContentColor = Color.White,
+                pressedContainerColor = Color.White.copy(alpha = 0.12f),
+                pressedContentColor = Color.White,
+            ),
+            scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .onPreviewKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    when (event.key) {
+                        Key.DirectionDown -> if (expanded && textScroll.canScrollForward) {
+                            scope.launch { textScroll.animateScrollBy(scrollStep) }
+                            true
+                        } else {
+                            false
+                        }
+                        Key.DirectionUp -> if (expanded && textScroll.canScrollBackward) {
+                            scope.launch { textScroll.animateScrollBy(-scrollStep) }
+                            true
+                        } else {
+                            onDirectionUp?.invoke() == true
+                        }
+                        else -> false
+                    }
+                }
+                .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(40.dp),
+            ) {
+                if (overview.isNotEmpty()) {
+                    Text(
+                        text = overview,
+                        fontSize = 15.sp,
+                        lineHeight = 21.sp,
+                        color = Color.White.copy(alpha = if (isFocused) 0.95f else 0.82f),
+                        maxLines = if (expanded) Int.MAX_VALUE else 4,
+                        overflow = TextOverflow.Ellipsis,
+                        // tvOS keeps the description to a readable measure with
+                        // the facts right beside it.
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .widthIn(max = 500.dp)
+                            .then(
+                                if (expanded) {
+                                    Modifier.heightIn(max = AboutExpandedMaxHeight).verticalScroll(textScroll)
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                    )
+                }
+                if (facts.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier.width(240.dp),
+                        verticalArrangement = Arrangement.spacedBy(9.dp),
+                    ) {
+                        facts.forEach { (label, value) ->
+                            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                                Text(
+                                    text = label.displayUppercase(),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.2.sp,
+                                    color = Color.White.copy(alpha = 0.5f),
+                                    maxLines = 1,
+                                )
+                                Text(
+                                    text = value,
+                                    fontSize = 14.sp,
+                                    color = Color.White.copy(alpha = 0.9f),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2538,13 +2791,13 @@ private fun TvAudiobookNarrationsSection(
         modifier = modifier.widthIn(max = 720.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        TvDetailSectionHeader(title = "Alternate Narrations")
+        TvDetailSectionHeader(title = stringResource(CommonR.string.detail_audiobook_alternateNarrations))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             narrations.forEachIndexed { index, narration ->
                 TvAudiobookDetailActionRow(
                     title = narration.title,
                     subtitle = narration.narrators.joinToString(", ").takeIf { it.isNotBlank() },
-                    trailing = narration.year?.takeIf { it > 0 }?.toString(),
+                    trailing = narration.year?.takeIf { it > 0 }?.let { LocaleFormat.integer(it, currentNumberLocale()) },
                     onClick = { onNarrationSelected(narration) },
                     upFocusRequester = if (index == 0) firstRowUpFocusRequester else null,
                     onDirectionUp = if (index == 0) onDirectionUp else null,
@@ -2703,6 +2956,7 @@ private data class TvAudiobookDisplayChapter(
  * file's own chapters unchanged, so their behaviour is exactly as before.
  */
 private fun audiobookDisplayChapters(
+    resources: Resources,
     timeline: AudiobookTimeline?,
     versions: List<FileVersion>,
 ): List<TvAudiobookDisplayChapter> {
@@ -2710,8 +2964,8 @@ private fun audiobookDisplayChapters(
         return timeline.chapters.map { chapter ->
             TvAudiobookDisplayChapter(
                 title = chapter.title?.trim()?.takeIf { it.isNotBlank() }
-                    ?: "Chapter ${chapter.index + 1}",
-                partTitle = "Part ${chapter.trackIndex + 1}",
+                    ?: resources.getString(CommonR.string.detail_audiobook_chapter, LocaleFormat.integer(chapter.index + 1)),
+                partTitle = resources.getString(CommonR.string.detail_audiobook_part, LocaleFormat.integer(chapter.trackIndex + 1)),
                 startSeconds = chapter.startSeconds,
             )
         }
@@ -2721,7 +2975,7 @@ private fun audiobookDisplayChapters(
         ?: versions.firstOrNull()
     return file?.chapters.orEmpty().mapIndexed { index, chapter ->
         TvAudiobookDisplayChapter(
-            title = audiobookChapterTitle(index, chapter),
+            title = audiobookChapterTitle(resources, index, chapter),
             partTitle = "",
             startSeconds = chapter.startSeconds,
         )
@@ -2729,25 +2983,27 @@ private fun audiobookDisplayChapters(
 }
 
 private fun audiobookChapterTitle(
+    resources: Resources,
     fallbackIndex: Int,
     chapter: VersionChapter,
-): String = chapter.title.trim().takeIf { it.isNotBlank() } ?: "Chapter ${fallbackIndex + 1}"
+): String = chapter.title.trim().takeIf { it.isNotBlank() }
+    ?: resources.getString(CommonR.string.detail_audiobook_chapter, LocaleFormat.integer(fallbackIndex + 1))
 
 /** Part row label: the file name when present, else "Part {presentationPartIndex}"
  *  (falling back to the 0-based track [position], displayed 1-based). Mirrors the
  *  phone AudiobookDetailContent `partTitle`. */
-private fun audiobookPartTitle(version: FileVersion?, position: Int): String {
+private fun audiobookPartTitle(resources: Resources, version: FileVersion?, position: Int): String {
     version?.fileName?.takeIf { it.isNotBlank() }?.let { return it }
     val rawIndex = version?.presentationPartIndex ?: position
     val displayIndex = if (rawIndex <= 0) rawIndex + 1 else rawIndex
-    return "Part $displayIndex"
+    return resources.getString(CommonR.string.detail_audiobook_part, LocaleFormat.integer(displayIndex))
 }
 
-private fun audiobookPartSubtitle(part: FileVersion?): String? =
+private fun audiobookPartSubtitle(resources: Resources, part: FileVersion?): String? =
     listOfNotNull(
         part?.codecAudio?.takeIf { it.isNotBlank() }?.uppercase(),
         part?.container?.takeIf { it.isNotBlank() }?.uppercase(),
-        part?.bitrate?.takeIf { it > 0 }?.let { "${it / 1000} kbps" },
+        part?.bitrate?.takeIf { it > 0 }?.let { resources.getString(CommonR.string.settings_rate_kbps, LocaleFormat.integer(it / 1000)) },
     )
         .joinToString("  ")
         .takeIf { it.isNotBlank() }
@@ -2791,6 +3047,7 @@ private fun org.siloserver.silo.model.catalog.LeafItemUserData.resumePositionSec
  * (season), mirroring silo-apple's `playButtonLabel(for:)`.
  */
 private fun playButtonLabel(
+    resources: Resources,
     isSeriesOrSeason: Boolean,
     seriesContainer: Boolean,
     nextUp: EpisodeListItem?,
@@ -2798,14 +3055,20 @@ private fun playButtonLabel(
     resumePosition: Double?,
 ): String {
     if (isSeriesOrSeason && nextUp != null) {
-        val verb = if (hasResume) "Resume" else "Play"
-        return if (seriesContainer) {
-            "$verb S${nextUp.seasonNumber}:E${nextUp.episodeNumber}"
-        } else {
-            "$verb E${nextUp.episodeNumber}"
+        val season = LocaleFormat.codeNumber(nextUp.seasonNumber)
+        val episode = LocaleFormat.codeNumber(nextUp.episodeNumber)
+        return when {
+            seriesContainer && hasResume -> resources.getString(CommonR.string.detail_resumeEpisode, season, episode)
+            seriesContainer -> resources.getString(CommonR.string.detail_playEpisode, season, episode)
+            hasResume -> resources.getString(CommonR.string.detail_resumeEpisodeNumber, episode)
+            else -> resources.getString(CommonR.string.detail_playEpisodeNumber, episode)
         }
     }
-    return if (hasResume && resumePosition != null) "Resume ${resumePosition.formatHms()}" else "Play"
+    return if (hasResume && resumePosition != null) {
+        resources.getString(CommonR.string.detail_resumeAt, resumePosition.formatHms())
+    } else {
+        resources.getString(CommonR.string.common_play)
+    }
 }
 
 private fun Double.formatHms(): String {
@@ -2813,11 +3076,7 @@ private fun Double.formatHms(): String {
     val hours = totalSeconds / 3600
     val minutes = (totalSeconds % 3600) / 60
     val seconds = totalSeconds % 60
-    return if (hours > 0) {
-        "$hours:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}"
-    } else {
-        "$minutes:${seconds.toString().padStart(2, '0')}"
-    }
+    return LocaleFormat.clock(hours, minutes, seconds)
 }
 
 /** Approved tvOS 64pt body rhythm and 140pt page tail at Android's 0.5 scale. */
@@ -2899,7 +3158,7 @@ internal fun resolveTvDetailHeroArtwork(
 private val DetailAnchorScrollSpec = tween<Float>(durationMillis = 400, easing = FastOutSlowInEasing)
 
 /** tvOS Series uses a slower, single smooth curve when supporting content
- * hands focus back to the fixed Show/Season/Episodes/Version viewport. */
+ * hands focus back to the fixed Season/Episodes/Version viewport. */
 private val SeriesPrimaryScrollSpec = tween<Float>(durationMillis = 800, easing = FastOutSlowInEasing)
 
 /**

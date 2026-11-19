@@ -1,5 +1,12 @@
 package org.siloserver.silo.tv.ui.shell
 
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.i18n.UiText
+import org.siloserver.silo.common.i18n.sectionTitle
+import org.siloserver.silo.common.i18n.text
+import org.siloserver.silo.common.i18n.uppercaseForUi
 import org.siloserver.silo.model.catalog.CatalogBoxSet
 import org.siloserver.silo.model.catalog.boxSetCard
 import androidx.activity.compose.BackHandler
@@ -30,10 +37,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
-import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.SwitchAccount
 import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -107,6 +115,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import org.siloserver.silo.common.diagnostics.DiagnosticsFocusLogger
 import org.siloserver.silo.common.ui.components.ThumbhashImage
 import org.siloserver.silo.common.ui.components.ProfileAvatarRef
+import org.siloserver.silo.tv.ui.screens.player.TvPlayerChrome
 import org.siloserver.silo.tv.ui.theme.SiloOnSurface
 import org.siloserver.silo.tv.ui.theme.DarkBackground
 import org.siloserver.silo.common.network.ServerReachabilityMonitor
@@ -121,6 +130,10 @@ import org.siloserver.silo.model.feature.RequestsFeatureStore
 import org.siloserver.silo.model.personal.UserLibrary
 import org.siloserver.silo.network.ApiResult
 import org.siloserver.silo.network.ServerRegistry
+import org.siloserver.silo.network.TokenManager
+import org.siloserver.silo.network.accountsOn
+import org.siloserver.silo.model.server.ProfileMenuRow
+import org.siloserver.silo.model.server.profileMenuRow
 import org.siloserver.silo.repository.AuthRepository
 import org.siloserver.silo.repository.PersonalDataRepository
 import org.siloserver.silo.repository.ProfileRepository
@@ -140,6 +153,7 @@ import org.siloserver.silo.tv.ui.screens.browse.TvBrowseScreen
 import org.siloserver.silo.tv.ui.screens.calendar.TvCalendarScreen
 import org.siloserver.silo.tv.ui.screens.collections.TvCollectionsScreen
 import org.siloserver.silo.tv.ui.screens.home.TvHomeScreen
+import org.siloserver.silo.tv.ui.screens.home.tvHomeBrowseSectionId
 import org.siloserver.silo.tv.ui.screens.libraries.TvLibrariesScreen
 import org.siloserver.silo.tv.ui.screens.personal.TvFavoritesScreen
 import org.siloserver.silo.tv.ui.screens.personal.TvHistoryScreen
@@ -208,8 +222,12 @@ fun TvMainShell(
     onOpenSectionBrowse: (sectionId: String, title: String, libraryId: Int?, mediaScope: String?) -> Unit,
     /** Runs the sign-out the user chose in [TvSignOutDialog]. */
     onSignOut: (removeServer: Boolean) -> Unit,
+    /** Opens the open account's picker. */
     onSwitchProfile: () -> Unit,
-    onSwitchServer: () -> Unit,
+    /** The profile menu's Add Profile: opens the new-profile form. */
+    onAddProfile: () -> Unit,
+    /** Opens Change Account: the saved servers and their accounts. */
+    onChangeAccount: () -> Unit,
     onPairDevice: () -> Unit,
     onPlayItem: (contentId: String, type: String?, resumePositionSeconds: Double?) -> Unit,
     /** Open the Watch Party hub. */
@@ -231,10 +249,11 @@ fun TvMainShell(
     val requestsFeatureStore: RequestsFeatureStore = koinInject()
     val metadataAiFeatureStore: org.siloserver.silo.model.feature.MetadataAiFeatureStore = koinInject()
     val shuffleFeatureStore: org.siloserver.silo.model.feature.ShuffleFeatureStore = koinInject()
+    val ratingSourcesStore: org.siloserver.silo.model.feature.RatingSourcesStore = koinInject()
     val serverRegistry: ServerRegistry = koinInject()
     val reachabilityState by reachabilityMonitor.state.collectAsState()
     val requestsEnabled by requestsFeatureStore.isEnabled.collectAsState()
-    val requestsResolved by requestsFeatureStore.isResolved.collectAsState()
+    val requestsKnownUnavailable by requestsFeatureStore.isKnownUnavailable.collectAsState()
     val activeServerEntry by serverRegistry.activeEntry.collectAsState()
     val tvLibraryScopeStore: TvLibraryScopeStore = koinInject()
     // One shell-scoped Home owner feeds both the Home screen and General's
@@ -264,6 +283,9 @@ fun TvMainShell(
     // device can only come back from the server.
     var librariesReloadPending by remember { mutableStateOf(false) }
     var librariesRetry by remember { mutableIntStateOf(0) }
+    // Whether a library load has succeeded, so [libraries] is the list TV
+    // shows rather than "not known yet"; see homeCollectionLibraryIds.
+    var librariesKnown by remember { mutableStateOf(false) }
     LaunchedEffect(reachabilityState.status, reachabilityState.lastCheckedAtMs) {
         if (librariesReloadPending && reachabilityState.status == ServerReachabilityStatus.Reachable) librariesRetry++
     }
@@ -288,6 +310,7 @@ fun TvMainShell(
         when (result) {
             is ApiResult.Success -> {
                 value = result.data.visibleOnTv().sortedBy { it.sortOrder }
+                librariesKnown = true
             }
             // Keep what's shown, minus a library hidden since.
             is ApiResult.Error,
@@ -384,7 +407,11 @@ fun TvMainShell(
         mutableStateOf(currentRoute == TvMainRoute.Requests.route)
     }
 
-    LaunchedEffect(activeServerEntry?.id, activeServerEntry?.profileId) {
+    LaunchedEffect(activeServerEntry?.id, activeServerEntry?.accountId, activeServerEntry?.profileId) {
+        // First, in its own coroutine: sort lists need it, and it should not
+        // wait on the suspending refreshes below.
+        ratingSourcesStore.reset()
+        launch { ratingSourcesStore.refresh() }
         requestsFeatureStore.reset()
         requestsFeatureStore.refresh()
         metadataAiFeatureStore.reset()
@@ -533,11 +560,6 @@ fun TvMainShell(
         detailReturnRoot = null
         onOpenLibraryItemDetail(contentId, libraryId)
     }
-    val openBoxSet: (CatalogBoxSet) -> Unit = { boxSet ->
-        restoreContentAfterDetail = true
-        detailReturnRoot = null
-        onOpenBoxSet(boxSet)
-    }
     // Collections open outer routes too, so they need the same hand-back:
     // without it the return resume left focus to Compose's default search
     // (the top bar), which then visibly hopped to the grid a beat later.
@@ -557,20 +579,43 @@ fun TvMainShell(
         detailReturnRoot = null
         onOpenCollectionDetail(collectionId, title)
     }
+    // A Home collection card returns like a Home item: the feed restores focus
+    // to the card it was opened from.
+    // The libraries whose server collections Home may show: the ones TV
+    // shows this profile (never ebooks), once a load has said which. Null
+    // until then, and Home holds server collections back meanwhile.
+    val homeCollectionLibraryIds = remember(librariesKnown, libraries) {
+        if (librariesKnown) libraries.mapTo(mutableSetOf()) { it.id } else null
+    }
+    val openHomeCollection: (org.siloserver.silo.model.section.SectionCollectionCard) -> Unit = open@{ card ->
+        // Null for a personal collection. Decoding drops server collections
+        // without a library; guard anyway.
+        val libraryId = if (card.isUserCollection) null else card.libraryIdInt ?: return@open
+        restoreContentAfterDetail = true
+        detailReturnRoot = TvMainRoute.Home.route
+        suppressFeedRefreshAfterDetail = true
+        if (libraryId == null) {
+            onOpenCollectionDetail(card.id, card.title)
+        } else {
+            val libraryType = libraries.firstOrNull { it.id == libraryId }?.type.orEmpty()
+            onOpenLibraryCollectionDetail(libraryId, card.id, card.title, libraryType, "library_collection", null)
+        }
+    }
     // A row's full page is an outer route like a detail page, so it takes the
     // same hand-back: Home's feed restores focus to the row's "Explore all"
     // card, and a library's feed does the same through its own return target.
+    val context = LocalContext.current
     val openHomeSection: (org.siloserver.silo.model.section.ResolvedSection) -> Unit = { section ->
         restoreContentAfterDetail = true
         detailReturnRoot = TvMainRoute.Home.route
         suppressFeedRefreshAfterDetail = true
-        onOpenSectionBrowse(section.id, section.title, null, null)
+        onOpenSectionBrowse(section.tvHomeBrowseSectionId(), context.sectionTitle(section), null, null)
     }
     val openLibrarySection: (org.siloserver.silo.model.section.ResolvedSection, Int, String?) -> Unit =
         { section, libraryId, mediaScope ->
             restoreContentAfterDetail = true
             detailReturnRoot = null
-            onOpenSectionBrowse(section.id, section.title, libraryId, mediaScope)
+            onOpenSectionBrowse(section.id, context.sectionTitle(section), libraryId, mediaScope)
         }
     var contentUpFallback by remember { mutableStateOf<((Boolean) -> Boolean)?>(null) }
     // Feeds that registered the up-fallback slot, were superseded by a newer
@@ -669,14 +714,23 @@ fun TvMainShell(
         //
         // Nothing hangs on it — it is a caption, not a permission — but it is
         // the part that misleads.
-        val subtitle = if (activeProfile?.isPrimary == true) {
-            user?.role?.takeIf { it.isNotBlank() }?.replaceFirstChar { it.uppercase() }
-                ?: user?.username.orEmpty()
+        // With several accounts on this server, "profile · server" alone
+        // doesn't say whose profile it is: add the account's username
+        // (multi-account spec §4.3). It replaces the role, which belongs to
+        // the same account.
+        val serverId = activeServerEntry?.id
+        val severalAccounts = serverId != null && serverRegistry.accountsOn(serverId).size > 1
+        val subtitle = if (severalAccounts) {
+            (serverRegistry.activeAccount.value?.username?.takeIf { it.isNotBlank() } ?: user?.username)
+                ?.takeIf { it.isNotBlank() }?.let(UiText::Raw)
+        } else if (activeProfile?.isPrimary == true) {
+            user?.role?.takeIf { it.isNotBlank() }?.let(::roleText)
+                ?: user?.username?.takeIf { it.isNotBlank() }?.let(UiText::Raw)
         } else {
-            ""
+            null
         }
         value = TvAccountState(
-            displayName = activeProfile?.name ?: user?.username ?: "Profile",
+            displayName = activeProfile?.name ?: user?.username,
             // Ref + presigned URL travel together; the shell re-fetches this on
             // every profile switch / server change, which is also what hands the
             // avatar a freshly signed URL.
@@ -1035,7 +1089,29 @@ fun TvMainShell(
         }
     }
 
-    LaunchedEffect(currentRoute, visibleRoots, librariesLoaded, showAudiobooksTabResolved, requestsResolved, requestsEnabled) {
+    LaunchedEffect(currentRoute, visibleRoots, librariesLoaded, showAudiobooksTabResolved, requestsKnownUnavailable) {
+        // The Requests page and request details close once the server answers
+        // that requests are off, back to whatever opened them, as Back would:
+        // a detail opened from Search lands on Search, and Requests opened
+        // from a tab lands on that tab. A plain pop saves nothing, so a later
+        // tab switch can't restore a Requests screen (navigateToRoute's
+        // saveState pop would, and the tab would bounce Home every time).
+        // Stacked details ("More like this") share one route pattern, so this
+        // effect would not run again between them: pop the whole run at once.
+        // A restored Requests route (or a return from a title opened there)
+        // stays while the status read runs, or if it fails.
+        fun isRequestsRoute(route: String?) =
+            route == TvMainRoute.Requests.route || route == TvMainRoute.RequestDetail.ROUTE
+        if (isRequestsRoute(currentRoute)) {
+            if (requestsKnownUnavailable) {
+                while (isRequestsRoute(nestedNav.currentDestination?.route) &&
+                    nestedNav.previousBackStackEntry != null
+                ) {
+                    if (!nestedNav.popBackStack()) break
+                }
+            }
+            return@LaunchedEffect
+        }
         // Wait until libraries have actually loaded — before that `visibleRoots`
         // is just Home + Calendar, and a restored/deep-linked `main/movies` route
         // would be wrongly ejected even though that type exists. Likewise wait for
@@ -1043,13 +1119,6 @@ fun TvMainShell(
         // omits Audiobooks, so a restored `main/audiobooks` route would be ejected
         // to Home before the DataStore read completes.
         if (!librariesLoaded || !showAudiobooksTabResolved) return@LaunchedEffect
-        // Requests closes once the server's requests status reads as off. A
-        // restored Requests route (or a return from a title opened there) must
-        // not be ejected while that read runs.
-        if (currentRoute == TvMainRoute.Requests.route) {
-            if (requestsResolved && !requestsEnabled) navigateToRoute(firstTvRoute())
-            return@LaunchedEffect
-        }
         // Only media-root tabs are eligible for the "tab no longer visible"
         // redirect. Non-tab routes (Settings, Favorites, Search, …) map
         // to null and must be left alone — otherwise navigating to Settings
@@ -1297,6 +1366,8 @@ fun TvMainShell(
                             openForYou(null)
                         },
                         onExploreSection = openHomeSection,
+                        onCollectionClick = openHomeCollection,
+                        homeCollectionLibraryIds = homeCollectionLibraryIds,
                         onOpenSettings = {
                             navigateToRoute(TvMainRoute.Settings.route)
                             moveFocusToContent(TvMainRoute.Settings.route)
@@ -1325,6 +1396,8 @@ fun TvMainShell(
                             openForYou(null)
                         },
                         onExploreSection = openHomeSection,
+                        onCollectionClick = openHomeCollection,
+                        homeCollectionLibraryIds = homeCollectionLibraryIds,
                         onOpenSettings = {
                             navigateToRoute(TvMainRoute.Settings.route)
                             moveFocusToContent(TvMainRoute.Settings.route)
@@ -1365,7 +1438,6 @@ fun TvMainShell(
                     TvLibrariesScreen(
                         onItemClick = openLibraryItemDetail,
                         onExploreSection = { section, libraryId -> openLibrarySection(section, libraryId, null) },
-                        onBoxSetClick = openBoxSet,
                         onLibraryCollectionClick = openLibraryCollectionDetail,
                         onUserCollectionClick = openCollectionDetail,
                         onInitialContentFocus = { focusState.closeProfileMenuForContent() },
@@ -1376,7 +1448,6 @@ fun TvMainShell(
                     TvLibrariesScreen(
                         onItemClick = openLibraryItemDetail,
                         onExploreSection = { section, libraryId -> openLibrarySection(section, libraryId, null) },
-                        onBoxSetClick = openBoxSet,
                         onLibraryCollectionClick = openLibraryCollectionDetail,
                         onUserCollectionClick = openCollectionDetail,
                         onInitialContentFocus = { focusState.closeProfileMenuForContent() },
@@ -1399,7 +1470,6 @@ fun TvMainShell(
                         onItemClick = { contentId ->
                             openLibraryItemDetail(contentId, activeLibrary(TvLibraryTabType.Movies)?.id)
                         },
-                        onBoxSetClick = openBoxSet,
                         onLibraryCollectionClick = openLibraryCollectionDetail,
                         onUserCollectionClick = openCollectionDetail,
                         onExploreSection = openLibrarySection,
@@ -1419,7 +1489,6 @@ fun TvMainShell(
                         onItemClick = { contentId ->
                             openLibraryItemDetail(contentId, activeLibrary(TvLibraryTabType.Series)?.id)
                         },
-                        onBoxSetClick = openBoxSet,
                         onLibraryCollectionClick = openLibraryCollectionDetail,
                         onUserCollectionClick = openCollectionDetail,
                         onExploreSection = openLibrarySection,
@@ -1439,7 +1508,6 @@ fun TvMainShell(
                         onItemClick = { contentId ->
                             openLibraryItemDetail(contentId, activeLibrary(TvLibraryTabType.Music)?.id)
                         },
-                        onBoxSetClick = openBoxSet,
                         onLibraryCollectionClick = openLibraryCollectionDetail,
                         onUserCollectionClick = openCollectionDetail,
                         onExploreSection = openLibrarySection,
@@ -1459,7 +1527,6 @@ fun TvMainShell(
                         onItemClick = { contentId ->
                             openLibraryItemDetail(contentId, activeLibrary(TvLibraryTabType.Audiobooks)?.id)
                         },
-                        onBoxSetClick = openBoxSet,
                         onLibraryCollectionClick = openLibraryCollectionDetail,
                         onUserCollectionClick = openCollectionDetail,
                         onExploreSection = openLibrarySection,
@@ -1795,11 +1862,27 @@ fun TvMainShell(
         }
 
         if (focusState.profileMenuOpen) {
+            // The profile row follows the open account's cached list and
+            // limit, which the picker's loads and the launch and return
+            // refreshes keep current.
+            val openAccount by serverRegistry.activeAccount.collectAsState()
+            val tokenManager: TokenManager = koinInject()
+            // A remote-playback handoff session can neither switch nor add.
+            val isHandoffSession by produceState(false) { value = tokenManager.hasTemporaryScope() }
             TvProfileDropdown(
                 accountState = accountSnapshot,
                 entersMenu = focusState.profileMenuEntered,
                 focusEntryToken = focusState.profileMenuFocusEntryToken,
+                profileRow = openAccount.profileMenuRow(isHandoffSession),
                 onSwitchProfile = closeMenuAnd(onSwitchProfile),
+                // Closed as Back closes it, with focus back on the avatar:
+                // the primary profile's PIN prompt may be cancelled, which
+                // leaves the viewer on this screen.
+                onAddProfile = {
+                    focusState.dismissProfileMenu()
+                    onAddProfile()
+                },
+                onChangeAccount = closeMenuAnd(onChangeAccount),
                 onHistory = closeMenuAnd {
                     navigateToSecondary(TvMainRoute.History.route)
                     moveFocusToContent(TvMainRoute.History.route)
@@ -1815,7 +1898,6 @@ fun TvMainShell(
                     // the Home row restored by the shared content container.
                     navigateToRoute(TvMainRoute.Settings.route)
                 },
-                onSwitchServer = closeMenuAnd(onSwitchServer),
                 onSignOut = closeMenuAnd { showSignOutDialog = true },
                 onDismiss = { focusState.dismissProfileMenu() },
                 modifier = Modifier
@@ -1849,7 +1931,6 @@ private fun TvLibraryTypeContent(
     selectedPill: TvLibraryPill,
     sectionRequestNonce: Int,
     onItemClick: (contentId: String) -> Unit,
-    onBoxSetClick: (CatalogBoxSet) -> Unit,
     onLibraryCollectionClick: (
         libraryId: Int,
         collectionId: String,
@@ -1870,7 +1951,7 @@ private fun TvLibraryTypeContent(
         // of flashing the empty-state message.
         if (emptyConfirmed) {
             TvCatalogEmptyState(
-                message = "No ${type.title} libraries available for this profile.",
+                message = stringResource(type.noLibrariesRes),
                 modifier = Modifier
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.background),
@@ -1893,9 +1974,7 @@ private fun TvLibraryTypeContent(
             libraryTitle = library.name,
             libraryType = library.type,
             mediaScope = type.mediaScope(library),
-            boxSetsEnabled = library.boxSetsEnabled,
             onItemClick = onItemClick,
-            onBoxSetClick = onBoxSetClick,
             onCollectionClick = { collectionId, title, isUserCollection ->
                 val scope = type.mediaScope(library)
                 if (scope != null) {
@@ -1930,6 +2009,16 @@ private fun openBrowseItem(
     } else {
         onOpenItemDetail(item.contentId)
     }
+}
+
+/**
+ * A server role as shown: the catalog's word for a known role (in any case, as
+ * the Settings rows read it), else the role as sent, capitalized.
+ */
+private fun roleText(role: String): UiText = when (role.lowercase()) {
+    "admin" -> UiText.Res(CommonR.string.shell_profileMenu_role_admin)
+    "user" -> UiText.Res(CommonR.string.shell_profileMenu_role_user)
+    else -> UiText.Raw(role.replaceFirstChar { it.uppercase() })
 }
 
 /**
@@ -2030,12 +2119,23 @@ private fun cascadePanelOffset(
  * Skyline panel chrome ([tvSkylinePanelChrome]) floats under the avatar on its
  * own shadow — NO full-screen page scrim. The panel is a focus group that
  * consumes input and focuses its first row on open; Back/Menu closes it and
- * returns focus to the avatar via [onDismiss].
+ * returns focus to the avatar via [onDismiss]. As on tvOS and Roku, nothing
+ * divides the header from the first row, one divider splits the two groups,
+ * and Sign Out is drawn in the destructive red.
  *
- * Row set + order mirrors tvOS and Roku: Switch Profile · History · Requests
- * (while the server has it enabled) · Watch Party (Settings → Experimental) ·
- * Settings · Switch Server · Sign Out. Watchlist and Favorites live under For
- * You only.
+ * Row set + order mirrors tvOS and Roku: History · Requests (while the
+ * server has it enabled) · Watch Party (Settings → Experimental), then
+ * Settings · the profile row · Change Account · Sign Out, the second group's
+ * order on the phones too. Watchlist and Favorites live under For You only.
+ * Change Account replaces Switch Server (owner decision 2026-11-02): the
+ * saved servers and their accounts, directly under the profile row. Sign Out
+ * leaves the account in use.
+ *
+ * The profile row follows the open account ([profileRow]): Switch Profile
+ * opens its picker while it has several profiles; Add Profile opens the
+ * new-profile form while it has one and room for another; there is no row
+ * while it has one and its limit is one. Focus opens on the first row,
+ * History.
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -2043,20 +2143,24 @@ private fun TvProfileDropdown(
     accountState: TvAccountState,
     entersMenu: Boolean,
     focusEntryToken: Int,
+    profileRow: ProfileMenuRow,
     onSwitchProfile: () -> Unit,
+    onAddProfile: () -> Unit,
+    onChangeAccount: () -> Unit,
     onHistory: () -> Unit,
     showRequests: Boolean,
     onRequests: () -> Unit,
     showWatchParty: Boolean,
     onWatchParty: () -> Unit,
     onSettings: () -> Unit,
-    onSwitchServer: () -> Unit,
     onSignOut: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val firstFocus = remember { FocusRequester() }
-    LaunchedEffect(entersMenu, focusEntryToken) {
+    // Also when the profile row changes while the menu is open, so focus
+    // never stays on a row that has gone: it returns to the first row.
+    LaunchedEffect(entersMenu, focusEntryToken, profileRow) {
         if (entersMenu && focusEntryToken > 0) {
             runCatching { firstFocus.requestFocus() }
         }
@@ -2083,21 +2187,18 @@ private fun TvProfileDropdown(
     ) {
         ProfileDropdownHeader(accountState)
 
-        ProfileDropdownDivider()
-
         ProfileDropdownRow(
-            label = "Switch Profile",
-            icon = Icons.Filled.People,
+            label = stringResource(CommonR.string.menu_history),
+            icon = Icons.Filled.History,
             focusRequester = firstFocus,
-            onClick = onSwitchProfile,
+            onClick = onHistory,
         )
-        ProfileDropdownRow(label = "History", icon = Icons.Filled.History, onClick = onHistory)
         if (showRequests) {
-            ProfileDropdownRow(label = "Requests", icon = Icons.Filled.Inbox, onClick = onRequests)
+            ProfileDropdownRow(label = stringResource(CommonR.string.menu_requests), icon = Icons.Filled.Inbox, onClick = onRequests)
         }
         if (showWatchParty) {
             ProfileDropdownRow(
-                label = "Watch Party",
+                label = stringResource(CommonR.string.menu_profileMenu_watchParty),
                 icon = Icons.Filled.People,
                 onClick = onWatchParty,
             )
@@ -2105,21 +2206,44 @@ private fun TvProfileDropdown(
 
         ProfileDropdownDivider()
 
-        ProfileDropdownRow(label = "Settings", icon = Icons.Filled.Settings, onClick = onSettings)
-        ProfileDropdownRow(label = "Switch Server", icon = Icons.Filled.Dns, onClick = onSwitchServer)
+        ProfileDropdownRow(label = stringResource(CommonR.string.menu_settings), icon = Icons.Filled.Settings, onClick = onSettings)
+        when (profileRow) {
+            ProfileMenuRow.SwitchProfile -> ProfileDropdownRow(
+                label = stringResource(CommonR.string.menu_switchProfile),
+                icon = Icons.Filled.People,
+                onClick = onSwitchProfile,
+            )
+            ProfileMenuRow.AddProfile -> ProfileDropdownRow(
+                label = stringResource(CommonR.string.menu_addProfile),
+                icon = Icons.Filled.PersonAdd,
+                onClick = onAddProfile,
+            )
+            ProfileMenuRow.None -> Unit
+        }
         ProfileDropdownRow(
-            label = "Sign Out",
+            label = stringResource(CommonR.string.menu_changeAccount),
+            icon = Icons.Filled.SwitchAccount,
+            onClick = onChangeAccount,
+        )
+        ProfileDropdownRow(
+            label = stringResource(CommonR.string.menu_signOut),
             icon = Icons.AutoMirrored.Filled.Logout,
+            destructive = true,
             onClick = onSignOut,
         )
     }
 }
 
-/** Avatar + display name + subtitle + server name header (tvOS §5.8). */
+/**
+ * Avatar and display name over one line: the server's name, then the
+ * account's role or username when there is one (tvOS §5.8 puts the server
+ * first).
+ */
 @Composable
 private fun ProfileDropdownHeader(accountState: TvAccountState) {
-    val avatarText = remember(accountState.avatar, accountState.displayName) {
-        profileAvatarDisplayText(accountState.avatar, accountState.displayName)
+    val displayName = accountState.shownName()
+    val avatarText = remember(accountState.avatar, displayName) {
+        profileAvatarDisplayText(accountState.avatar, displayName)
     }
     val avatarImage = rememberProfileAvatarImage(accountState.avatar)
     Row(
@@ -2143,7 +2267,7 @@ private fun ProfileDropdownHeader(accountState: TvAccountState) {
                 ThumbhashImage(
                     url = avatarImage.url,
                     thumbhash = null,
-                    contentDescription = accountState.displayName,
+                    contentDescription = displayName,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop,
                     transparent = true,
@@ -2160,7 +2284,7 @@ private fun ProfileDropdownHeader(accountState: TvAccountState) {
         }
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = accountState.displayName,
+                text = displayName,
                 color = SiloOnSurface,
                 fontWeight = FontWeight.SemiBold,
                 style = MaterialTheme.typography.titleMedium.copy(
@@ -2170,12 +2294,12 @@ private fun ProfileDropdownHeader(accountState: TvAccountState) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            val subtitle = listOf(accountState.subtitle, accountState.serverName)
+            val subtitle = listOf(accountState.serverName, accountState.subtitle?.text().orEmpty())
                 .filter { it.isNotBlank() }
                 .joinToString("  ·  ")
             if (subtitle.isNotEmpty()) {
                 Text(
-                    text = subtitle.uppercase(),
+                    text = subtitle.uppercaseForUi(),
                     color = SiloOnSurface.copy(alpha = 0.38f),
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontSize = TvSkyline.profileMenuHeaderSubtitleSize,
@@ -2228,7 +2352,7 @@ private fun TvServerOfflinePill(
         ),
     ) {
         Text(
-            text = "Offline mode - select to retry",
+            text = stringResource(CommonR.string.shell_offline_selectToRetry),
             modifier = Modifier.padding(horizontal = 22.dp, vertical = 10.dp),
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.SemiBold,
@@ -2241,7 +2365,9 @@ private fun TvServerOfflinePill(
 /**
  * Inverted-capsule dropdown row (tvOS §5.8 / cascade grammar): a leading icon
  * and label that invert to a solid [SiloOnSurface] fill with
- * [DarkBackground] content on focus, bare at rest.
+ * [DarkBackground] content on focus, bare at rest. A [destructive] row draws
+ * its icon and label in the destructive red at rest, as tvOS and Roku do,
+ * and inverts like the others on focus.
  */
 @Composable
 private fun ProfileDropdownRow(
@@ -2249,10 +2375,15 @@ private fun ProfileDropdownRow(
     icon: ImageVector,
     onClick: () -> Unit,
     focusRequester: FocusRequester? = null,
+    destructive: Boolean = false,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
-    val contentColor = if (isFocused) DarkBackground else SiloOnSurface.copy(alpha = 0.9f)
+    val contentColor = when {
+        isFocused -> DarkBackground
+        destructive -> TvPlayerChrome.StopText
+        else -> SiloOnSurface.copy(alpha = 0.9f)
+    }
     val rowShape = RoundedCornerShape(TvSkyline.profileMenuRowCornerRadius)
 
     Surface(

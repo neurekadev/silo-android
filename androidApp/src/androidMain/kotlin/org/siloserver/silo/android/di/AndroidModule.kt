@@ -79,6 +79,7 @@ import org.siloserver.silo.android.ui.screens.profiles.ProfileSelectionViewModel
 import org.siloserver.silo.android.ui.screens.servers.ServerListViewModel
 import org.siloserver.silo.android.ui.screens.downloads.DownloadsViewModel
 import org.siloserver.silo.viewmodel.HomeViewModel
+import org.siloserver.silo.viewmodel.PasswordChangeViewModel
 import org.siloserver.silo.android.ui.screens.libraries.LibrariesViewModel
 import org.siloserver.silo.viewmodel.FavoritesViewModel
 import org.siloserver.silo.viewmodel.HistoryViewModel
@@ -271,7 +272,8 @@ val androidModule = module {
             fetchName = probe::name,
         )
     }
-    single<CompanionPairingServerStore> { RegistryCompanionPairingServerStore(get(), get()) }
+    // Saved servers with their accounts; each account approves with its own credentials.
+    single<CompanionPairingServerStore> { RegistryCompanionPairingServerStore(get(), get(), identityTransitions = get()) }
     single<CompanionDeviceLoginApprover> {
         val authRepository = get<org.siloserver.silo.repository.AuthRepository>()
         // The nearby approval card names the account approving signs the TV in as.
@@ -338,6 +340,7 @@ val androidModule = module {
                     get<org.siloserver.silo.repository.ServerIdentityRepository>().entriesFor(serverId, candidates)
                 },
             ),
+            registry = get(),
         )
     }
     single { PushMessageHandler(presenter = get()) }
@@ -375,6 +378,7 @@ val androidModule = module {
         // No network evidence: the phone's measured throughput describes its
         // own link, not the receiver's, so cast starts carry no estimate.
         CastPlaybackPreparer(
+            context = androidContext(),
             playbackRepository = get(),
             tokenManager = get(),
         )
@@ -559,7 +563,7 @@ val androidModule = module {
     viewModel { params -> org.siloserver.silo.viewmodel.SectionBrowseViewModel(get(), params.get()) }
     viewModel { RequestsViewModel(get()) }
     viewModel { RequestSearchViewModel(get()) }
-    viewModel { MyRequestsViewModel(get()) }
+    viewModel { MyRequestsViewModel(get(), featureStore = get()) }
     viewModel { params -> RequestDiscoverRowViewModel(get(), params[0], params[1]) }
     // Platform supplies "today" and the IANA timezone; the shared ViewModel's
     // week math stays deterministic in commonTest (no Clock.System default).
@@ -583,7 +587,7 @@ val androidModule = module {
     single {
         org.siloserver.silo.android.auth.SignOutTeardown(
             get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(),
-            unregisterPush = { get<AndroidPushRegistrar>().unregisterDevice(it) },
+            unregisterPush = { serverId, accountId -> get<AndroidPushRegistrar>().unregisterDevice(serverId, accountId) },
             restorePush = { get<AndroidPushRegistrar>().restoreRegistration(it) },
         )
     }
@@ -630,7 +634,15 @@ val androidModule = module {
         val tokens = get<org.siloserver.silo.network.TokenManager>()
         ServerSetupViewModel(get(), get(), hasSession = { !tokens.getAccessToken().isNullOrBlank() })
     }
-    viewModel { LoginViewModel(get(), get(), get(), get(), get(), get()) }
+    viewModel {
+        val signOut = get<org.siloserver.silo.android.auth.SignOutTeardown>()
+        val downloads = get<org.siloserver.silo.common.downloads.DownloadMetadataStore>()
+        LoginViewModel(
+            get(), get(), get(), get(), get(), get(),
+            signOutAccount = { serverId, accountId -> signOut.signOutAccount(serverId, accountId) },
+            downloadSummary = { serverId, accountId -> downloads.downloadSummary(serverId, accountId) },
+        )
+    }
     viewModel {
         org.siloserver.silo.android.ui.screens.settings.SignInSettingsViewModel(get(), get(), get(), get(), get())
     }
@@ -638,14 +650,41 @@ val androidModule = module {
     viewModel { SignupViewModel(get()) }
     viewModel { InviteClaimViewModel(get(), get()) }
     viewModel { OnboardingTourViewModel(get(), get(), get(), get(), get()) }
-    viewModel { ProfileSelectionViewModel(get(), get(), profileVerificationRecovery = getOrNull()) }
+    viewModel {
+        ProfileSelectionViewModel(
+            get(), get(),
+            profileVerificationRecovery = getOrNull(),
+            registry = get(),
+            tokenManager = get(),
+            profilesRefresher = get(),
+        )
+    }
+    viewModel {
+        val signOut = get<org.siloserver.silo.android.auth.SignOutTeardown>()
+        org.siloserver.silo.android.ui.screens.servers.ChangeAccountViewModel(
+            registry = get(),
+            authRepository = get(),
+            tokenManager = get(),
+            profileRepository = get(),
+            profilesRefresher = get(),
+            flushPendingSettings = { signOut.flushPendingSettings() },
+            clearProfileCaches = profileCacheReset(),
+        )
+    }
+    viewModel { PasswordChangeViewModel(get<org.siloserver.silo.repository.AuthRepository>()) }
     viewModel { CreateProfileViewModel(get()) }
     viewModel { EditProfileViewModel(get()) }
     viewModel {
+        val signOut = get<org.siloserver.silo.android.auth.SignOutTeardown>()
+        val downloads = get<org.siloserver.silo.common.downloads.DownloadMetadataStore>()
         ServerListViewModel(
             get(), get(), get(), get(),
             unregisterPush = { get<AndroidPushRegistrar>().unregisterDevice(it) },
             restorePush = { get<AndroidPushRegistrar>().restoreRegistration(it) },
+            signOutAccount = { serverId, accountId -> signOut.signOutAccount(serverId, accountId) },
+            downloadSummary = { serverId, accountId -> downloads.downloadSummary(serverId, accountId) },
+            flushPendingSettings = { signOut.flushPendingSettings() },
+            clearProfileCaches = profileCacheReset(),
         )
     }
     viewModel { params ->
@@ -684,9 +723,25 @@ val androidModule = module {
         org.siloserver.silo.common.ebook.EbookLocalStateStore(androidContext().filesDir)
     }
 
-    // Audiobook + book readers. SavedStateHandle is auto-injected via Koin's
-    // viewModel scope wiring so the contentId nav arg flows through.
+    // The phone's audiobook session, scoped to the activity. It creates the
+    // player view model itself, passing the route's arguments as the
+    // SavedStateHandle, so the book outlives its player route. The session
+    // ends when the signed-in server, account or profile changes.
     viewModel {
+        org.siloserver.silo.android.ui.screens.audiobook.AudiobookSessionViewModel(
+            identity = get<ServerRegistry>().activeEntry
+                .map { Triple(it?.url, it?.accountId, it?.profileId) }
+                .distinctUntilChanged(),
+            createPlayer = { savedStateHandle ->
+                get<org.siloserver.silo.common.player.AudiobookPlayerViewModel> {
+                    org.koin.core.parameter.parametersOf(savedStateHandle)
+                }
+            },
+        )
+    }
+    // Audiobook + book readers. Only AudiobookSessionViewModel creates the
+    // audiobook player, passing its SavedStateHandle as a parameter.
+    viewModel { params ->
         org.siloserver.silo.common.player.AudiobookPlayerViewModel(
             catalogRepository = get(),
             playbackSessionManager = get(AUDIOBOOK_PLAYBACK_SESSION_MANAGER_QUALIFIER),
@@ -695,13 +750,14 @@ val androidModule = module {
             bookmarksStore = get(),
             userItemStatePort = get(),
             outboxSyncScheduler = get(),
+            finalPlaybackPositionWriter = get(),
             serverRegistry = get(),
             profileRepository = get(),
             offlineMediaResolver = get(),
             audiobookSettings = get(),
             seekIntervalStore = get(),
             audiobookSeekRouter = get(),
-            savedStateHandle = get(),
+            savedStateHandle = params.get(),
         )
     }
     viewModel {
@@ -784,4 +840,20 @@ private suspend fun accountNameOn(
             null
         }
     is org.siloserver.silo.network.ApiResult.Error -> null
+}
+
+/**
+ * Drops the per-profile caches after another account becomes active, as the
+ * server switch does, so its shell can't render (or write back) the previous
+ * profile's values. The picker re-hydrates them once a profile is chosen.
+ */
+private fun org.koin.core.scope.Scope.profileCacheReset(): () -> Unit {
+    val overlays = get<org.siloserver.silo.common.settings.OverlayPrefsStore>()
+    val activeProfile = get<org.siloserver.silo.model.profile.ActiveProfileStore>()
+    val cards = get<org.siloserver.silo.common.settings.CardPresentationStore>()
+    return {
+        overlays.clear()
+        activeProfile.reset()
+        cards.clear()
+    }
 }

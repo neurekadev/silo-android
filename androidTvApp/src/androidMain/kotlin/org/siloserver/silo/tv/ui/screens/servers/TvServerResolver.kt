@@ -1,6 +1,8 @@
 package org.siloserver.silo.tv.ui.screens.servers
 
+import androidx.annotation.StringRes
 import kotlinx.coroutines.CancellationException
+import org.siloserver.silo.common.R as CommonR
 import org.siloserver.silo.common.profiles.ProfileLaunchPreferences
 import org.siloserver.silo.network.CleartextOriginConsent
 import org.siloserver.silo.network.ServerRegistry
@@ -8,11 +10,13 @@ import org.siloserver.silo.network.TokenManager
 import org.siloserver.silo.network.requiresApproval
 import org.siloserver.silo.repository.AuthRepository
 import org.siloserver.silo.tv.profiles.TvActiveProfileReset
+import org.siloserver.silo.tv.profiles.noAccountOpenButAnotherSignedIn
 
-/** Apple's wording (silo-apple `AppRouter.requestSignOut`). */
-internal const val TV_REMOVE_SERVER_FAILED = "Silo couldn't remove the saved server. Please try again."
+/** Apple's wording (silo-apple `AppRouter.requestSignOut`), as a string resource for a toast. */
+@StringRes
+internal val TV_REMOVE_SERVER_FAILED: Int = CommonR.string.servers_remove_failedToast
 
-enum class TvServerSwitchDestination { Home, ProfileSelection, Login, ServerSetup }
+enum class TvServerSwitchDestination { Home, ProfileSelection, ChangeAccount, Login, ServerSetup }
 
 /**
  * Where the TV goes once the active server changed: picked in Manage Servers,
@@ -82,6 +86,10 @@ class TvServerResolver(
         val accessToken = tokenManager.getAccessToken()
         val profileId = activeEntry.profileId ?: tokenManager.getProfileId()
         return when {
+            // No account open here: Change Account while another account
+            // has a session to go to, else this server's sign-in.
+            accessToken.isNullOrBlank() && serverRegistry.noAccountOpenButAnotherSignedIn() ->
+                TvServerSwitchDestination.ChangeAccount
             accessToken.isNullOrBlank() -> TvServerSwitchDestination.Login
             profileId.isNullOrBlank() -> TvServerSwitchDestination.ProfileSelection
             profileLaunchPreferences.requiresSelectionAtLaunch() -> {

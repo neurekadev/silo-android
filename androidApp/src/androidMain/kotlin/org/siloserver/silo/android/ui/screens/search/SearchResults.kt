@@ -1,5 +1,7 @@
 package org.siloserver.silo.android.ui.screens.search
 
+import org.siloserver.silo.viewmodel.DetailSeeds
+import org.siloserver.silo.common.i18n.LocaleFormat
 import org.siloserver.silo.model.catalog.seriesHeroBackdrop
 import org.siloserver.silo.common.cards.LocalEpisodeSpoilerPrefs
 import org.siloserver.silo.model.settings.EpisodeSpoilers
@@ -35,6 +37,9 @@ import org.siloserver.silo.common.ui.components.DeferImagePresentationWhileScrol
 import org.siloserver.silo.model.catalog.BrowseItem
 import org.siloserver.silo.model.catalog.CatalogBoxSet
 import org.siloserver.silo.model.catalog.Person
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.pluralStringResource
+import org.siloserver.silo.common.R as CommonR
 
 /**
  * Displays search results in a vertical grid of media cards.
@@ -109,7 +114,7 @@ fun SearchResults(
         if (boxSets.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }, contentType = "search-section-title") {
                 Text(
-                    text = "Box sets",
+                    text = stringResource(CommonR.string.search_boxSets),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp),
@@ -143,7 +148,11 @@ fun SearchResults(
         if (results.isNotEmpty() || (people.isEmpty() && boxSets.isEmpty())) {
             item(span = { GridItemSpan(maxLineSpan) }, contentType = "search-result-count") {
                 Text(
-                    text = "${if (totalExact) "" else "About "}$total result${if (total == 1) "" else "s"}",
+                    text = if (totalExact) {
+                        pluralStringResource(CommonR.plurals.search_result, total, total)
+                    } else {
+                        pluralStringResource(CommonR.plurals.search_resultAbout, total, total, LocaleFormat.integer(total))
+                    },
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     // The grid's own contentPadding supplies the 16.dp gutters, so
@@ -177,7 +186,10 @@ fun SearchResults(
                 year = item.year,
                 type = item.type,
                 userState = userState,
-                onClick = { onItemClick(item.contentId) },
+                onClick = {
+                    DetailSeeds.offer(item)
+                    onItemClick(item.contentId)
+                },
                 width = gridCellMinWidth,
                 overlay = org.siloserver.silo.overlays.OverlayDataExtractor.fromBrowseItem(item),
                 actions = actions,

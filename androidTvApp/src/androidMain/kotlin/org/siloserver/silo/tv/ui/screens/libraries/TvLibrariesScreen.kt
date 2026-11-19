@@ -1,6 +1,6 @@
 package org.siloserver.silo.tv.ui.screens.libraries
 
-import org.siloserver.silo.model.catalog.CatalogBoxSet
+import org.siloserver.silo.common.i18n.text
 import androidx.compose.foundation.background
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -8,6 +8,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import org.siloserver.silo.common.R as CommonR
 import androidx.tv.material3.MaterialTheme
 import org.siloserver.silo.tv.ui.components.TvCatalogEmptyState
 import org.siloserver.silo.tv.ui.components.TvErrorScreen
@@ -23,7 +25,6 @@ fun TvLibrariesScreen(
     onItemClick: (contentId: String, libraryId: Int) -> Unit,
     /** Opens a Recommended row's full page in that library. */
     onExploreSection: ((org.siloserver.silo.model.section.ResolvedSection, Int) -> Unit)? = null,
-    onBoxSetClick: (CatalogBoxSet) -> Unit = {},
     onLibraryCollectionClick: (
         libraryId: Int,
         collectionId: String,
@@ -53,12 +54,12 @@ fun TvLibrariesScreen(
             modifier = Modifier.background(MaterialTheme.colorScheme.background),
         )
         state.error != null && state.libraries.isEmpty() -> TvErrorScreen(
-            message = state.error!!,
+            message = state.error!!.text(),
             onRetry = viewModel::load,
             modifier = Modifier.background(MaterialTheme.colorScheme.background),
         )
         state.libraries.isEmpty() -> TvCatalogEmptyState(
-            message = "No libraries available for this profile.",
+            message = stringResource(CommonR.string.library_noLibrariesForProfile),
             modifier = Modifier.background(MaterialTheme.colorScheme.background),
         )
         selectedLibrary != null -> {
@@ -67,10 +68,8 @@ fun TvLibrariesScreen(
                     libraryId = selectedLibrary.id,
                     libraryTitle = selectedLibrary.name,
                     libraryType = selectedLibrary.type,
-                    boxSetsEnabled = selectedLibrary.boxSetsEnabled,
                     onItemClick = { onItemClick(it, selectedLibrary.id) },
                     onExploreSection = onExploreSection?.let { open -> { section -> open(section, selectedLibrary.id) } },
-                    onBoxSetClick = onBoxSetClick,
                     onCollectionClick = { collectionId, title, isUserCollection ->
                         if (isUserCollection) {
                             onUserCollectionClick(collectionId, title)
